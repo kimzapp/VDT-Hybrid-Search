@@ -1,270 +1,155 @@
+import os
+import json
+import gc
+import torch
+import faiss
+import numpy as np
 import ir_datasets
 from tqdm import tqdm
 from itertools import islice
-import numpy as np
-import faiss
 from sentence_transformers import SentenceTransformer
-import json
-import os
-import torch
-import gc
 from multiprocessing import freeze_support
 
-if __name__ == "__main__":
-    freeze_support()  # For Windows support when using multiprocessing
+import argparse
 
-    # configurations
-    SAVE_PATH: str = './bge_small_en_v1.5_embeddings_faiss'
-    os.makedirs(SAVE_PATH, exist_ok=True)
-    EMB_PATH = os.path.join(SAVE_PATH, 'embeddings.npy')
-    METADATA_PATH = os.path.join(SAVE_PATH, 'doc_ids.jsonl')
-    FAISS_INDEX_PATH = os.path.join(SAVE_PATH, 'faiss.index')
+def parse_args():
+    parser = argparse.ArgumentParser(description="Dense Indexing with FAISS and Sentence Transformers")
+    
+    # Configurations
+    parser.add_argument("--save_path", type=str, default="./bge_small_en_v1.5_embeddings_faiss", help="Directory to save embeddings and index")
+    parser.add_argument("--model", type=str, default="BAAI/bge-small-en-v1.5", help="Sentence Transformer model name or path")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size for encoding")
+    parser.add_argument("--chunk_size", type=int, default=500_000, help="Size of chunks fed to multiprocessing")
+    parser.add_argument("--target_devices", nargs="+", default=["cuda:0", "cuda:1"], help="List of target devices (e.g., cuda:0 cuda:1)")
+    parser.add_argument("--no_normalize_emb", action="store_true", help="Do NOT normalize embeddings (Defaults to normalizing)")
+    parser.add_argument("--corpus_id", type=str, default="msmarco-passage", help="IR dataset corpus ID")
+    
+    # Debug flags
+    parser.add_argument("--quick_run", action="store_true", help="Run with a small subset of data for testing")
+    parser.add_argument("--max_samples", type=int, default=1000, help="Max samples for quick run")
+    
+    return parser.parse_args()
 
-    EMBEDDING_MODEL: str = 'BAAI/bge-small-en-v1.5'
-    BATCH_SIZE: int = 256
-    DEVICE = ['cuda:0', 'cuda:1']
-    NORMALIZE_EMB: bool = True
+def load_corpus(corpus_id="msmarco-passage", max_samples=None):
+    """Load only the passages required for indexing."""
+    print(f"Loading corpus from: {corpus_id}")
+    dataset = ir_datasets.load(corpus_id)
+    
+    doc_ids, texts = [], []
+    iterator = dataset.docs_iter()
+    if max_samples:
+        iterator = islice(iterator, max_samples)
+        
+    for doc in tqdm(iterator, desc="Loading passages text"):
+        doc_ids.append(doc.doc_id)
+        texts.append(doc.text)
+        
+    return doc_ids, texts
 
-    # config for dry test
-    QUICK_RUN: bool = False
-    MAX_SAMPLES: int = 100
+def main():
+    args = parse_args()
+    
+    # Resolve Paths
+    emb_path = os.path.join(args.save_path, 'embeddings.npy')
+    metadata_path = os.path.join(args.save_path, 'doc_ids.jsonl')
+    faiss_index_path = os.path.join(args.save_path, 'faiss.index')
 
-    def preview_iter(title, iterator, fields, n=5):
-        print(f"\n========== {title} ==========")
+    os.makedirs(args.save_path, exist_ok=True)
 
-        for i, item in enumerate(islice(iterator, n), start=1):
-            print(f"\n--- {title[:-1].title()} {i} ---")
-            for field in fields:
-                value = getattr(item, field)
-                if field == "text":
-                    value = value[:500]
-                print(f"{field}:", value)
+    # 1. Load Corpus
+    doc_ids, texts = load_corpus(
+        corpus_id=args.corpus_id, 
+        max_samples=args.max_samples if args.quick_run else None
+    )
+    num_docs = len(doc_ids)
+    print(f"Total passages loaded: {num_docs:,}")
 
+    # 2. Setup Model & Multi-processing
+    model = SentenceTransformer(args.model)
+    try:
+        embedding_dim = model.get_sentence_embedding_dimension()
+    except AttributeError:
+        embedding_dim = model.get_embedding_dimension()
 
-    def download_and_preview_msmarco(
-        corpus_id="msmarco-passage",
-        eval_id="msmarco-passage/dev/small",
-        n_samples=1,
-    ):
-        passages = ir_datasets.load(corpus_id)
-        eval_set = ir_datasets.load(eval_id)
+    print(f"Embedding dim: {embedding_dim}")
+    print(f"Target devices: {args.target_devices}")
 
-        preview_iter(
-            "SAMPLE PASSAGES",
-            passages.docs_iter(),
-            fields=["doc_id", "text"],
-            n=n_samples,
-        )
-
-        preview_iter(
-            "SAMPLE QUERIES",
-            eval_set.queries_iter(),
-            fields=["query_id", "text"],
-            n=n_samples,
-        )
-
-        preview_iter(
-            "SAMPLE QRELS",
-            eval_set.qrels_iter(),
-            fields=["query_id", "doc_id", "relevance"],
-            n=n_samples,
-        )
-
-        corpus = {}
-        queries = {}
-        qrels = {}
-
-        print("\n========== LOADING FULL CORPUS ==========")
-        for doc in tqdm(passages.docs_iter(), desc="Loading passages"):
-            corpus[doc.doc_id] = doc.text
-
-        print(f"Total passages loaded: {len(corpus):,}")
-
-        print("\n========== LOADING QUERIES ==========")
-        for query in tqdm(eval_set.queries_iter(), desc="Loading queries"):
-            queries[query.query_id] = query.text
-
-        print(f"Total queries loaded: {len(queries):,}")
-
-        print("\n========== LOADING QRELS ==========")
-        for qrel in tqdm(eval_set.qrels_iter(), desc="Loading qrels"):
-            qrels.setdefault(qrel.query_id, {})[qrel.doc_id] = qrel.relevance
-
-        print(f"Total qrels queries loaded: {len(qrels):,}")
-
-        return corpus, queries, qrels
-
-
-    corpus, _, __ = download_and_preview_msmarco()
-
-    # =========================
-    # Helpers
-    # =========================
-
-    def batched_doc_iter(corpus, batch_size, max_samples=None):
-        """
-        Yield batches of (doc_ids, texts) without materializing the full corpus texts.
-        corpus is assumed to be dict-like: {doc_id: text}
-        """
-        iterator = corpus.items()
-
-        if max_samples is not None:
-            iterator = islice(iterator, max_samples)
-
-        batch_doc_ids = []
-        batch_texts = []
-
-        for doc_id, text in iterator:
-            batch_doc_ids.append(doc_id)
-            batch_texts.append(text)
-
-            if len(batch_doc_ids) == batch_size:
-                yield batch_doc_ids, batch_texts
-                batch_doc_ids = []
-                batch_texts = []
-
-        if batch_doc_ids:
-            yield batch_doc_ids, batch_texts
-
-
-    # =========================
-    # 1. Load model
-    # =========================
-
-    # Không set device='cuda' ở đây.
-    # Multi-process pool sẽ tự copy model sang từng GPU.
-    model = SentenceTransformer(EMBEDDING_MODEL)
-
-    embedding_dim = model.get_sentence_embedding_dimension()
-    # Nếu version cũ của sentence-transformers không có get_sentence_embedding_dimension,
-    # có thể đổi lại thành:
-    # embedding_dim = model.get_embedding_dimension()
-
-    num_docs = min(len(corpus), MAX_SAMPLES) if QUICK_RUN else len(corpus)
-
-    target_devices = ["cuda:0", "cuda:1"]
-
-    print("Number of docs:", num_docs)
-    print("Embedding dim:", embedding_dim)
-    print("Target devices:", target_devices)
-
-
-    # =========================
-    # 2. Create disk-backed .npy file
-    # =========================
-    # open_memmap creates a valid .npy file, but writes chunk by chunk.
-    # This avoids holding the full embedding matrix in RAM.
-
+    # 3. Create uninitialized disk-backed .npy file
     embeddings_mmap = np.lib.format.open_memmap(
-        EMB_PATH,
+        emb_path,
         mode="w+",
         dtype="float32",
         shape=(num_docs, embedding_dim),
     )
 
-
-    # =========================
-    # 3. Start multi-GPU pool
-    # =========================
-
-    pool = model.start_multi_process_pool(
-        target_devices=target_devices
-    )
-
-
-    # =========================
-    # 4. Encode + write incrementally
-    # =========================
-
-    row_id = 0
-
+    # 4. Encode & write incrementally in chunks
+    pool = model.start_multi_process_pool(target_devices=args.target_devices)
+    
     try:
-        with open(METADATA_PATH, "w", encoding="utf-8") as meta_f:
-            pbar = tqdm(total=num_docs, desc="Encoding corpus", unit="docs")
-
-            for batch_doc_ids, batch_texts in batched_doc_iter(
-                corpus=corpus,
-                batch_size=BATCH_SIZE,
-                max_samples=MAX_SAMPLES if QUICK_RUN else None,
-            ):
-                batch_embeddings = model.encode_multi_process(
-                    sentences=batch_texts,
+        with open(metadata_path, "w", encoding="utf-8") as meta_f:
+            row_idx = 0
+            pbar = tqdm(total=num_docs, desc="Encoding corpus", unit="doc")
+            
+            for i in range(0, num_docs, args.chunk_size):
+                chunk_texts = texts[i : i + args.chunk_size]
+                chunk_ids = doc_ids[i : i + args.chunk_size]
+                
+                # Multi-GPU encoding of the chunk
+                chunk_embeddings = model.encode_multi_process(
+                    sentences=chunk_texts,
                     pool=pool,
-                    batch_size=BATCH_SIZE,
-                    normalize_embeddings=NORMALIZE_EMB,
+                    batch_size=args.batch_size,
+                    normalize_embeddings=not args.no_normalize_emb,
                 ).astype("float32", copy=False)
-
-                batch_size_actual = len(batch_doc_ids)
-                start = row_id
-                end = row_id + batch_size_actual
-
-                embeddings_mmap[start:end] = batch_embeddings
-
-                for i, doc_id in enumerate(batch_doc_ids):
-                    meta_f.write(
-                        json.dumps(
-                            {
-                                "row_id": start + i,
-                                "doc_id": str(doc_id),
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    )
-
-                row_id = end
-                pbar.update(batch_size_actual)
-
-                # Explicit cleanup for long-running jobs
-                del batch_embeddings
-                del batch_texts
-                del batch_doc_ids
-
+                
+                chunk_size_actual = len(chunk_embeddings)
+                end_idx = row_idx + chunk_size_actual
+                
+                # Write embeddings to disk
+                embeddings_mmap[row_idx:end_idx] = chunk_embeddings
+                
+                # Write metadata
+                for idx, doc_id in enumerate(chunk_ids):
+                    meta_line = json.dumps({"row_id": row_idx + idx, "doc_id": str(doc_id)}, ensure_ascii=False)
+                    meta_f.write(meta_line + "\n")
+                
+                row_idx = end_idx
+                pbar.update(chunk_size_actual)
+                
+                del chunk_embeddings
                 gc.collect()
 
             pbar.close()
-
     finally:
-        # Rất quan trọng: tránh worker process bị treo sau khi xong / lỗi.
         model.stop_multi_process_pool(pool)
 
-
-    # Flush mmap data to disk
     embeddings_mmap.flush()
+    print(f"Saved embeddings: {emb_path}")
+    print(f"Saved metadata: {metadata_path}")
 
-    assert row_id == num_docs, f"Expected {num_docs}, got {row_id}"
-
-    print("Saved embeddings:", EMB_PATH)
-    print("Saved metadata:", METADATA_PATH)
-    print("Embedding shape:", embeddings_mmap.shape)
-
-    # =========================
-    # Build FAISS index from saved mmap embeddings
-    # =========================
-
-    embeddings = np.load(EMB_PATH, mmap_mode="r")
-
-    num_docs, dim = embeddings.shape
-
-    print("Loaded embeddings:", embeddings.shape)
-
-    if NORMALIZE_EMB:
-        base_index = faiss.IndexFlatIP(dim)
+    # 5. Build FAISS index incrementally
+    print("\nBuilding FAISS index...")
+    embeddings_mmap = np.load(emb_path, mmap_mode="r")
+    
+    if not args.no_normalize_emb:
+        base_index = faiss.IndexFlatIP(embedding_dim)
     else:
-        base_index = faiss.IndexFlatL2(dim)
-
+        base_index = faiss.IndexFlatL2(embedding_dim)
+        
     index = faiss.IndexIDMap2(base_index)
 
-    row_ids = np.arange(num_docs).astype("int64")
+    # Add to FAISS in chunks to save RAM
+    pbar_faiss = tqdm(range(0, num_docs, args.chunk_size), desc="Indexing FAISS")
+    for i in pbar_faiss:
+        end_i = min(i + args.chunk_size, num_docs)
+        chunk_emb = np.array(embeddings_mmap[i:end_i], dtype="float32")
+        chunk_row_ids = np.arange(i, end_i, dtype="int64")
+        index.add_with_ids(chunk_emb, chunk_row_ids)
+    
+    assert index.ntotal == num_docs, f"Expected {num_docs}, got {index.ntotal}"
+    faiss.write_index(index, faiss_index_path)
+    print(f"Saved FAISS index: {faiss_index_path} (size: {index.ntotal})")
 
-    index.add_with_ids(
-        np.asarray(embeddings, dtype="float32"),
-        row_ids,
-    )
-
-    assert index.ntotal == num_docs
-
-    faiss.write_index(index, FAISS_INDEX_PATH)
-
-    print("Saved FAISS index:", FAISS_INDEX_PATH)
-    print("FAISS index size:", index.ntotal)
+if __name__ == "__main__":
+    freeze_support()
+    main()
