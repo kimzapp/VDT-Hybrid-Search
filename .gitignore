@@ -6,3 +6,5 @@ runs/*
 bm25_index
 __pycache__
 bge_base_en_v1.5_embedding_faiss
+bge_large_en_v1.5_embedding_faiss
+mxbai_large_embedding_faiss
