@@ -1,7 +1,8 @@
 artifacts
-bge_small_en_v1.5_embeddings_faiss
+bge_small_en_v1.5_embedding_faiss
 index_dense_demo
 index_sparse_demo
 runs/*
 bm25_index
 __pycache__
+bge_base_en_v1.5_embedding_faiss
