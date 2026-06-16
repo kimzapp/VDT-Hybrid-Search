@@ -8,3 +8,5 @@ __pycache__
 bge_base_en_v1.5_embedding_faiss
 bge_large_en_v1.5_embedding_faiss
 mxbai_large_embedding_faiss
+qwen3_4b_embedding_faiss
+msmarco_regex_wordlevel_tokenizer
