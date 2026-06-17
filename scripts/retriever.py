@@ -13,11 +13,13 @@ from sentence_transformers import SentenceTransformer
 
 
 class BM25SRetriever:
-    def __init__(self, corpus=None, tokenize_kwargs=None):
+    def __init__(self, corpus=None, tokenize_kwargs=None, backend="auto", backend_selection="auto", n_threads=-1):
         self.doc_ids = None
         self.doc_texts = None
         self.tokenize_kwargs = tokenize_kwargs or {}
-        self.retriever = bm25s.BM25()
+        self.backend_selection = backend_selection
+        self.n_threads = n_threads
+        self.retriever = bm25s.BM25(backend=backend)
         if corpus is not None:
             self.doc_ids = list(corpus.keys())
             self.doc_texts = [corpus[doc_id] for doc_id in self.doc_ids]
@@ -48,9 +50,9 @@ class BM25SRetriever:
         print(f"Saved doc id mapping: {len(self.doc_ids):,}")
 
     @classmethod
-    def load(cls, index_dir, mmap=True, tokenize_kwargs=None):
-        obj = cls(corpus=None, tokenize_kwargs=tokenize_kwargs)
-        obj.retriever = bm25s.BM25.load(index_dir, mmap=mmap)
+    def load(cls, index_dir, mmap=True, tokenize_kwargs=None, backend="auto", backend_selection="auto", n_threads=-1):
+        obj = cls(corpus=None, tokenize_kwargs=tokenize_kwargs, backend=backend, backend_selection=backend_selection, n_threads=n_threads)
+        obj.retriever = bm25s.BM25.load(index_dir, mmap=mmap, backend=backend)
         doc_ids_path = os.path.join(index_dir, "doc_ids.jsonl")
         doc_ids = []
         with open(doc_ids_path, "r", encoding="utf-8") as f:
@@ -65,6 +67,9 @@ class BM25SRetriever:
         print(f"Loaded BM25 index from: {index_dir}")
         print(f"Loaded doc id mapping: {len(obj.doc_ids):,}")
         print(f"mmap: {mmap}")
+        print(f"backend: {obj.retriever.backend}")
+        print(f"backend_selection: {obj.backend_selection}")
+        print(f"n_threads: {obj.n_threads}")
         return obj
 
     def tokenize_queries(self, queries):
@@ -72,19 +77,20 @@ class BM25SRetriever:
             queries = [queries]
         return bm25s.tokenize(queries, **self.tokenize_kwargs)
 
-    def retrieve_tokens(self, query_tokens, top_k=100, return_dict=True, n_threads=0, chunk_size=128):
+    def retrieve_tokens(self, query_tokens, top_k=100, return_dict=True, n_threads=None, chunk_size=128):
         if self.doc_ids is None:
             raise ValueError("doc_ids is empty. Build or load index first.")
-        results, scores = self.retriever.retrieve(query_tokens, corpus=self.doc_ids, k=top_k, n_threads=n_threads, chunksize=chunk_size)
+        effective_n_threads = n_threads if n_threads is not None else self.n_threads
+        results, scores = self.retriever.retrieve(query_tokens, corpus=self.doc_ids, k=top_k, n_threads=effective_n_threads, chunksize=chunk_size, backend_selection=self.backend_selection)
         if not return_dict:
             return results, scores
         return self._format_results(results, scores)
 
-    def search(self, queries, top_k=100, return_dict=True, n_threads=0, chunk_size=128):
+    def search(self, queries, top_k=100, return_dict=True, n_threads=None, chunk_size=128):
         query_tokens = self.tokenize_queries(queries)
         return self.retrieve_tokens(query_tokens=query_tokens, top_k=top_k, return_dict=return_dict, n_threads=n_threads, chunk_size=chunk_size)
 
-    def search_batched(self, queries, top_k=100, batch_size=512, show_progress=True, n_threads=0, chunk_size=128):
+    def search_batched(self, queries, top_k=100, batch_size=512, show_progress=True, n_threads=None, chunk_size=128):
         if isinstance(queries, str):
             queries = [queries]
         all_results = []

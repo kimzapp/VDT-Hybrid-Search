@@ -133,6 +133,8 @@ def parse_args():
     # Parallel / FAISS settings
     parser.add_argument("--n_threads", type=int, default=-1, help="Number of threads for BM25 retrieval (-1 for all cores)")
     parser.add_argument("--chunk_size", type=int, default=128, help="Chunk size for BM25 retrieval batching")
+    parser.add_argument("--bm25_backend", type=str, default="auto", choices=["auto", "numba", "numpy"], help="BM25S scoring backend. 'auto' uses numba if available (≈2x faster), else numpy")
+    parser.add_argument("--bm25_backend_selection", type=str, default="auto", choices=["auto", "numba", "numpy", "jax"], help="BM25S top-k selection backend. 'auto' uses numba/jax if available")
     parser.add_argument("--faiss_num_threads", type=int, default=None, help="Number of FAISS CPU threads for dense retrieval")
     parser.add_argument("--dense_use_gpu", action="store_true", help="Move FAISS index to GPU if faiss-gpu is available")
     parser.add_argument("--dense_warmup", action="store_true", help="Run a few warmup dense searches before measuring latency")
@@ -355,7 +357,10 @@ def main():
     bm25_retriever = BM25SRetriever.load(
         args.sparse_index_dir,
         mmap=args.bm25_mmap,
-        tokenize_kwargs={}
+        tokenize_kwargs={},
+        backend=args.bm25_backend,
+        backend_selection=args.bm25_backend_selection,
+        n_threads=args.n_threads,
     )
 
     dense_retriever = DenseFaissRetriever.load(
