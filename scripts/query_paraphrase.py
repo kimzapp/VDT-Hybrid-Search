@@ -7,7 +7,7 @@ using 4 different strategies to evaluate retrieval system robustness:
 
 1. Synonym Substitution (WordNet) — tests vocabulary sensitivity
 2. Back-Translation (Helsinki NLP EN→DE→EN) — tests linguistic variation
-3. T5 Paraphrase (Vamsi/T5_Paraphrase_Paws) — tests semantic rewriting
+3. Parrot Paraphrase (prithivida/parrot_paraphraser_on_T5) — tests semantic rewriting
 4. LLM Rewrite (Qwen3-4B) — tests complex reformulation
 
 Each strategy saves queries as a TSV file loadable by ir_datasets.
@@ -208,68 +208,106 @@ class BackTranslationParaphraser:
 
 
 # =============================================================================
-# Strategy 3: T5 Paraphrase
+# Strategy 3: Parrot Paraphrase
 # =============================================================================
 
-class T5Paraphraser:
+class ParrotParaphraser:
     """
-    Use fine-tuned T5 model for high-quality paraphrase generation.
-    Model: Vamsi/T5_Paraphrase_Paws (fine-tuned on PAWS dataset).
-    Tests robustness to semantic rewriting.
+    Use Parrot paraphraser for query paraphrase generation.
+
+    The strategy key is still "t5" for backward compatibility with:
+      - STRATEGY_NAMES
+      - STRATEGY_FILE_MAP
+      - existing ir_datasets registration path
+
+    Parrot internally uses the model prithivida/parrot_paraphraser_on_T5.
     """
 
     def __init__(
         self,
-        model_name: str = "Vamsi/T5_Paraphrase_Paws",
+        model_tag: str = "prithivida/parrot_paraphraser_on_T5",
         device: str = "cuda",
         batch_size: int = 64,
-        max_length: int = 128,
-        num_beams: int = 5,
+        max_return_phrases: int = 10,
+        max_length: int = 64,
+        adequacy_threshold: float = 0.90,
+        fluency_threshold: float = 0.85,
+        diversity_ranker: str = "levenshtein",
+        do_diverse: bool = False,
+        seed: Optional[int] = 42,
     ):
-        from transformers import T5ForConditionalGeneration, T5Tokenizer
+        import warnings
+        import torch
+        from parrot import Parrot
 
-        print(f"   Loading T5 paraphrase model: {model_name}...")
-        self.tokenizer = T5Tokenizer.from_pretrained(model_name)
-        self.model = T5ForConditionalGeneration.from_pretrained(model_name).to(device)
-        self.model.eval()
-        self.device = device
-        self.batch_size = batch_size
+        warnings.filterwarnings("ignore")
+
+        if seed is not None:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+        self.use_gpu = device.startswith("cuda") and torch.cuda.is_available()
+        self.batch_size = batch_size  # kept only for compatibility with the pipeline
+        self.max_return_phrases = max_return_phrases
         self.max_length = max_length
-        self.num_beams = num_beams
-        print(f"   T5 paraphrase model loaded")
+        self.adequacy_threshold = adequacy_threshold
+        self.fluency_threshold = fluency_threshold
+        self.diversity_ranker = diversity_ranker
+        self.do_diverse = do_diverse
+
+        print(f"   Loading Parrot paraphraser: {model_tag}...")
+        print(f"   Parrot use_gpu={self.use_gpu}")
+        self.parrot = Parrot(model_tag=model_tag, use_gpu=self.use_gpu)
+        print("   Parrot paraphraser loaded")
+
+    @staticmethod
+    def _normalize_candidate(candidate) -> str:
+        """
+        Parrot versions may return either strings or tuples/lists.
+        This helper extracts the paraphrase text robustly.
+        """
+        if isinstance(candidate, str):
+            return candidate.strip()
+        if isinstance(candidate, (tuple, list)) and candidate:
+            return str(candidate[0]).strip()
+        return ""
+
+    def paraphrase(self, text: str) -> str:
+        """Generate one paraphrase for a single query."""
+        try:
+            candidates = self.parrot.augment(
+                input_phrase=text,
+                use_gpu=self.use_gpu,
+                diversity_ranker=self.diversity_ranker,
+                do_diverse=self.do_diverse,
+                max_return_phrases=self.max_return_phrases,
+                max_length=self.max_length,
+                adequacy_threshold=self.adequacy_threshold,
+                fluency_threshold=self.fluency_threshold,
+            )
+        except Exception as e:
+            print(f"   ⚠️  Parrot failed for query: {text!r} | error={e}")
+            return text
+
+        if not candidates:
+            return text
+
+        # Prefer the first non-identical paraphrase. Parrot already ranks/filter candidates.
+        for cand in candidates:
+            para = self._normalize_candidate(cand)
+            if para and para.lower() != text.lower():
+                return para
+
+        # Fallback: first valid candidate, otherwise original query.
+        first = self._normalize_candidate(candidates[0])
+        return first if first else text
 
     def paraphrase_batch(self, queries: Dict[str, str]) -> Dict[str, str]:
-        """Generate paraphrases for a batch of queries using T5."""
-        import torch
-
-        qids = list(queries.keys())
-        texts = [f"paraphrase: {q} </s>" for q in queries.values()]
-
-        results = []
-        for i in tqdm(range(0, len(texts), self.batch_size), desc="T5 paraphrase"):
-            batch = texts[i : i + self.batch_size]
-            encoding = self.tokenizer(
-                batch,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-            ).to(self.device)
-
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    input_ids=encoding["input_ids"],
-                    attention_mask=encoding["attention_mask"],
-                    max_length=self.max_length,
-                    num_beams=self.num_beams,
-                    early_stopping=True,
-                )
-            decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            results.extend(decoded)
-
+        """Generate paraphrases for a set of queries using Parrot."""
         paraphrased = OrderedDict()
-        for qid, text in zip(qids, results):
-            paraphrased[qid] = text
+        for qid, text in tqdm(queries.items(), desc="Parrot paraphrase"):
+            paraphrased[qid] = self.paraphrase(text)
         return paraphrased
 
 
@@ -662,9 +700,12 @@ def paraphrase_all_strategies(
             paraphrased = paraphraser.paraphrase_batch(queries)
 
         elif strategy == "t5":
-            paraphraser = T5Paraphraser(
+            # Keep the strategy key as "t5" for backward compatibility,
+            # but use Parrot as the actual implementation.
+            paraphraser = ParrotParaphraser(
                 device=device,
                 batch_size=batch_size,
+                seed=seed,
             )
             paraphrased = paraphraser.paraphrase_batch(queries)
 

@@ -266,9 +266,18 @@ class DenseFaissRetriever:
             print("use_gpu=True but FAISS GPU is not available. Falling back to CPU index.")
             return index
         try:
-            resources = faiss.StandardGpuResources()
-            gpu_index = faiss.index_cpu_to_gpu(resources, 0, index)
-            self._gpu_resources = resources  # keep resources alive
+            ngpus = faiss.get_num_gpus()
+            print(f"FAISS found {ngpus} GPUs. Utilizing all available GPUs.")
+            
+            if ngpus == 1:
+                resources = faiss.StandardGpuResources()
+                gpu_index = faiss.index_cpu_to_gpu(resources, 0, index)
+                self._gpu_resources = resources  # keep resources alive
+            else:
+                co = faiss.GpuMultipleClonerOptions()
+                co.shard = True
+                gpu_index = faiss.index_cpu_to_all_gpus(index, co)
+                
             self._index_on_gpu = True
             return gpu_index
         except Exception as exc:
@@ -302,7 +311,16 @@ class DenseFaissRetriever:
 
         # IVF needs training before adding vectors.
         if self.index_type == "ivf_flat" and not base_index.is_trained:
-            base_index.train(embeddings)
+            if self.use_gpu:
+                print("Moving index to GPU for training...")
+                gpu_base_index = self._maybe_to_gpu(base_index)
+                gpu_base_index.train(embeddings)
+                print("Moving index back to CPU for ID wrapping...")
+                if self._index_on_gpu:
+                    base_index = faiss.index_gpu_to_cpu(gpu_base_index)
+                    self._index_on_gpu = False
+            else:
+                base_index.train(embeddings)
 
         index = faiss.IndexIDMap2(base_index)
         row_ids = np.arange(len(self.doc_ids), dtype="int64")
