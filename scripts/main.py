@@ -5,12 +5,22 @@ import time
 import sys
 from datetime import datetime
 
+# Parse --target_devices early to set CUDA_VISIBLE_DEVICES before importing torch/faiss
+if "--target_devices" in sys.argv:
+    idx = sys.argv.index("--target_devices")
+    devices = []
+    for arg in sys.argv[idx+1:]:
+        if arg.startswith("-"):
+            break
+        # strip "cuda:" prefix if user provides it
+        devices.append(arg.replace("cuda:", ""))
+    if devices:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
+        print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} before loading libraries.")
+
 from retriever import BM25SRetriever, DenseFaissRetriever
-
 from data_loading import download_and_preview_msmarco
-
 from fusion import rrf_fusion_all
-
 from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report
 
 
@@ -129,6 +139,7 @@ def parse_args():
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-small-en-v1.5", help="Embedding model name")
     parser.add_argument("--no_normalize_emb", action="store_false", dest="normalize_emb", help="Disable embedding normalization")
     parser.add_argument("--device", type=str, default="cuda", help="Device for SentenceTransformer query encoding (cuda or cpu)")
+    parser.add_argument("--target_devices", nargs="+", default=None, help="List of GPU IDs to use (e.g. 0 1 or cuda:0). Sets CUDA_VISIBLE_DEVICES early.")
 
     # Parallel / FAISS settings
     parser.add_argument("--n_threads", type=int, default=-1, help="Number of threads for BM25 retrieval (-1 for all cores)")
