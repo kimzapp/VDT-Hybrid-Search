@@ -14,8 +14,102 @@ from fusion import rrf_fusion_all
 from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report
 
 
+# All metric families supported by ranx (use metric@k format, e.g. ndcg@10)
+SUPPORTED_METRICS = [
+    "hits",          # Number of relevant docs in top-k
+    "hit_rate",      # Fraction of queries with ≥1 relevant doc in top-k
+    "precision",     # Precision@k
+    "recall",        # Recall@k
+    "f1",            # F1@k (harmonic mean of precision & recall)
+    "r-precision",   # R-Precision (precision at R, where R = number of relevant docs)
+    "mrr",           # Mean Reciprocal Rank@k
+    "map",           # Mean Average Precision@k
+    "ndcg",          # Normalized Discounted Cumulative Gain@k
+    "ndcg_burges",   # NDCG (Burges et al. variant)@k
+    "dcg",           # Discounted Cumulative Gain@k
+    "dcg_burges",    # DCG (Burges et al. variant)@k
+    "bpref",         # Binary Preference
+    "rbp",           # Rank-Biased Precision (use rbp.p format, e.g. rbp.95)
+]
+
+DEFAULT_METRICS = ["mrr@10", "ndcg@10", "precision@10", "recall@10", "recall@100", "map@100"]
+
+
+def _parse_metric_name(metric_str):
+    """Extract the base metric name from a metric string like 'ndcg@10' or 'rbp.95'."""
+    if metric_str.startswith("rbp"):
+        return "rbp"
+    # Strip relevance-level suffix (e.g. ndcg@10-l2 -> ndcg@10)
+    base = metric_str.split("-l")[0]
+    # Strip @k cutoff (e.g. ndcg@10 -> ndcg)
+    base = base.split("@")[0]
+    return base
+
+
+def validate_metrics(metrics):
+    """Validate that all requested metrics are supported by ranx."""
+    invalid = []
+    for m in metrics:
+        base = _parse_metric_name(m)
+        if base not in SUPPORTED_METRICS:
+            invalid.append(m)
+    if invalid:
+        print(f"\n❌ Unsupported metrics: {invalid}")
+        print(f"   Supported metric families: {SUPPORTED_METRICS}")
+        print(f"   Use metric@k format (e.g. ndcg@10, mrr@100, recall@1000)")
+        print(f"   Append -lN for relevance level (e.g. ndcg@10-l2)")
+        print(f"   For RBP use rbp.p format (e.g. rbp.95)")
+        sys.exit(1)
+
+
+def print_supported_metrics():
+    """Print all supported metrics with descriptions and exit."""
+    print("\n" + "="*70)
+    print("📊 SUPPORTED EVALUATION METRICS (ranx)")
+    print("="*70)
+    print(f"\n{'Metric':<18} {'Description'}")
+    print(f"{'-'*18} {'-'*50}")
+    descriptions = {
+        "hits":         "Number of relevant docs retrieved in top-k",
+        "hit_rate":     "Fraction of queries with ≥1 relevant doc in top-k",
+        "precision":    "Precision at cutoff k",
+        "recall":       "Recall at cutoff k",
+        "f1":           "F1 score at cutoff k (harmonic mean of P & R)",
+        "r-precision":  "Precision at R (R = total relevant docs for query)",
+        "mrr":          "Mean Reciprocal Rank at cutoff k",
+        "map":          "Mean Average Precision at cutoff k",
+        "ndcg":         "Normalized Discounted Cumulative Gain at cutoff k",
+        "ndcg_burges":  "NDCG (Burges et al. 2005 variant) at cutoff k",
+        "dcg":          "Discounted Cumulative Gain at cutoff k",
+        "dcg_burges":   "DCG (Burges et al. 2005 variant) at cutoff k",
+        "bpref":        "Binary Preference (robust to incomplete judgments)",
+        "rbp":          "Rank-Biased Precision with persistence p (e.g. rbp.95)",
+    }
+    for metric in SUPPORTED_METRICS:
+        print(f"  {metric:<16} {descriptions.get(metric, '')}")
+    
+    print(f"\n{'='*70}")
+    print("📝 USAGE FORMAT")
+    print(f"{'='*70}")
+    print("  metric@k          → cutoff at rank k      (e.g. ndcg@10, recall@100)")
+    print("  metric@k-lN       → relevance level ≥ N   (e.g. ndcg@10-l2)")
+    print("  rbp.p             → persistence parameter  (e.g. rbp.95 = p=0.95)")
+    print(f"\n{'='*70}")
+    print("📌 EXAMPLES")
+    print(f"{'='*70}")
+    print("  --metrics mrr@10 ndcg@10 precision@10 recall@10")
+    print("  --metrics mrr@10 mrr@100 ndcg@5 ndcg@10 ndcg@20 map@100 recall@1000")
+    print("  --metrics ndcg@10-l2 map@100-l2     (graded relevance, level ≥ 2)")
+    print("  --metrics rbp.80 rbp.95              (RBP with p=0.80, p=0.95)")
+    print("  --metrics hit_rate@10 hits@10 f1@10 r-precision bpref")
+    print()
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Hybrid Search with BM25S and Dense FAISS")
+    parser = argparse.ArgumentParser(
+        description="Hybrid Search with BM25S and Dense FAISS",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     
     # Dataset config
     parser.add_argument("--corpus_id", type=str, default="msmarco-passage", help="ir_datasets corpus ID")
@@ -53,6 +147,21 @@ def parse_args():
     
     # Fusion config
     parser.add_argument("--rrf_k", type=int, default=60, help="RRF k parameter")
+    
+    # Evaluation metrics
+    parser.add_argument(
+        "--metrics", type=str, nargs="+",
+        default=DEFAULT_METRICS,
+        help="Evaluation metrics to compute in ranx format. "
+             "Supported: " + ", ".join(SUPPORTED_METRICS) + ". "
+             "Use metric@k (e.g. ndcg@10), metric@k-lN for relevance level, "
+             "rbp.p for rank-biased precision. "
+             "Default: " + " ".join(DEFAULT_METRICS),
+    )
+    parser.add_argument(
+        "--list_metrics", action="store_true",
+        help="Print all supported metrics with descriptions and exit",
+    )
     
     return parser.parse_args()
 
@@ -225,7 +334,14 @@ def main():
     os.makedirs(save_path, exist_ok=True)
     sys.stdout = Logger(os.path.join(save_path, "console.log"))
     
-    METRICS = ["mrr@10", "ndcg@10", "precision@10", "recall@10", "recall@100", "map@100"]
+    # Handle --list_metrics
+    if args.list_metrics:
+        print_supported_metrics()
+        sys.exit(0)
+
+    # Validate metrics before expensive operations
+    METRICS = args.metrics
+    validate_metrics(METRICS)
 
     print_header("EXPERIMENT CONFIGURATIONS")
     for k, v in vars(args).items():
