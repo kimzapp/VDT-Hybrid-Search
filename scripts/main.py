@@ -20,7 +20,7 @@ if "--target_devices" in sys.argv:
 
 from retriever import BM25SRetriever, DenseFaissRetriever
 from data_loading import download_and_preview_msmarco
-from fusion import rrf_fusion_all
+from fusion import get_fusion_fn, list_strategies
 from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report
 
 
@@ -43,6 +43,8 @@ SUPPORTED_METRICS = [
 ]
 
 DEFAULT_METRICS = ["mrr@10", "ndcg@10", "precision@10", "recall@10", "recall@100", "map@100"]
+
+RETRIEVAL_MODES = ["hybrid", "sparse", "dense"]
 
 
 def _parse_metric_name(metric_str):
@@ -125,6 +127,26 @@ def parse_args():
     parser.add_argument("--corpus_id", type=str, default="msmarco-passage", help="ir_datasets corpus ID")
     parser.add_argument("--eval_id", type=str, default="msmarco-passage/dev", help="ir_datasets eval ID")
     
+    # Retrieval mode
+    parser.add_argument(
+        "--mode", type=str, default="hybrid",
+        choices=RETRIEVAL_MODES,
+        help="Retrieval mode: 'hybrid' (sparse+dense+fusion), "
+             "'sparse' (BM25 only), 'dense' (FAISS only). Default: hybrid",
+    )
+    
+    # Fusion config
+    parser.add_argument(
+        "--fusion_strategy", type=str, default="rrf",
+        choices=list_strategies(),
+        help="Fusion strategy when mode=hybrid. "
+             f"Available: {', '.join(list_strategies())}. Default: rrf",
+    )
+    parser.add_argument("--rrf_k", type=int, default=60, help="RRF k parameter (used with --fusion_strategy rrf)")
+    parser.add_argument("--fusion_alpha", type=float, default=0.5,
+                        help="Alpha weight for sparse scores in weighted_sum fusion "
+                             "(0.0 = dense only, 1.0 = sparse only). Default: 0.5")
+    
     # Setting limits
     parser.add_argument("--max_queries", type=int, default=None, help="Max queries to evaluate (None for all)")
     parser.add_argument("--top_k", type=int, default=10, help="Top K documents to retrieve")
@@ -157,9 +179,6 @@ def parse_args():
     parser.add_argument("--run_name", type=str, default="demo_run", help="Name of the run")
     parser.add_argument("--sparse_index_dir", type=str, default="/home/rmits/VDT-Hybrid-Search/bm25_index", help="Path to BM25S index")
     parser.add_argument("--dense_index_dir", type=str, default="/home/rmits/VDT-Hybrid-Search/bge_small_en_v1.5_embeddings_faiss", help="Path to FAISS index")
-    
-    # Fusion config
-    parser.add_argument("--rrf_k", type=int, default=60, help="RRF k parameter")
     
     # Evaluation metrics
     parser.add_argument(
@@ -240,22 +259,19 @@ def _fmt_ms(value):
     return f"{value:.2f} ms"
 
 
-def retrieval_for_eval(
-    bm25_retriever,
-    dense_retriever,
-    query_texts,
-    top_k=100,
-    bm25_batch_size=512,
-    dense_batch_size=512,
-    dense_encode_batch_size=None,
-    dense_search_batch_size=None,
-    rrf_k=60,
-    n_threads=-1,
-    chunk_size=128,
-    faiss_num_threads=None,
-):
-    num_queries = len(query_texts)
+def _merge_latency_stats(base_stats, extra_stats):
+    """Merge two latency stat dicts (base + extra batch-level details)."""
+    if not extra_stats:
+        return base_stats
+    merged = dict(base_stats)
+    merged.update(extra_stats)
+    return merged
 
+
+def _run_sparse_retrieval(
+    bm25_retriever, query_texts, top_k, bm25_batch_size, n_threads, chunk_size,
+):
+    """Run BM25 sparse retrieval and return (results, stats)."""
     bm25_results, bm25_batch_stats = bm25_retriever.search_batched(
         query_texts,
         top_k=top_k,
@@ -265,7 +281,28 @@ def retrieval_for_eval(
         chunk_size=chunk_size,
     )
     bm25_time = bm25_batch_stats["total_seconds"]
+    num_queries = len(query_texts)
 
+    stats = _merge_latency_stats(
+        _latency_stats(bm25_time, num_queries, bm25_batch_size),
+        bm25_batch_stats,
+    )
+
+    print_header("SPARSE (BM25) RETRIEVAL LATENCY")
+    print_stat("BM25 retrieval time", f"{bm25_time:.2f}s")
+    print_stat("BM25 avg batch latency", f"{stats.get('avg_batch_latency_seconds', 0):.4f}s (size: {bm25_batch_size})")
+    print_stat("BM25 avg query latency", f"{stats['avg_latency_seconds_per_query']:.4f}s")
+    print_stat("BM25 p95 latency/query", _fmt_ms(stats.get("p95_batch_latency_ms_per_query", 0.0)))
+    print_stat("BM25 QPS", f"{stats['qps']:.2f}")
+
+    return bm25_results, stats
+
+
+def _run_dense_retrieval(
+    dense_retriever, query_texts, top_k, dense_batch_size,
+    dense_encode_batch_size, dense_search_batch_size, faiss_num_threads,
+):
+    """Run dense FAISS retrieval and return (results, stats)."""
     dense_results, dense_batch_stats = dense_retriever.search_batched(
         query_texts,
         top_k=top_k,
@@ -277,60 +314,120 @@ def retrieval_for_eval(
         faiss_num_threads=faiss_num_threads,
     )
     dense_time = dense_batch_stats["total_seconds"]
+    num_queries = len(query_texts)
 
-    start = time.perf_counter()
-    hybrid_results = rrf_fusion_all(
-        sparse_results=bm25_results,
-        dense_results=dense_results,
-        k=rrf_k,
-        top_k=top_k,
+    stats = _merge_latency_stats(
+        _latency_stats(dense_time, num_queries, dense_batch_size),
+        dense_batch_stats,
     )
-    hybrid_time = time.perf_counter() - start
 
-    def _merge_latency_stats(base_stats, extra_stats):
-        if not extra_stats:
-            return base_stats
-        merged = dict(base_stats)
-        merged.update(extra_stats)
-        return merged
-
-    retrieval_stats = {
-        "bm25s": _merge_latency_stats(
-            _latency_stats(bm25_time, num_queries, bm25_batch_size),
-            bm25_batch_stats,
-        ),
-        "dense_faiss": _merge_latency_stats(
-            _latency_stats(dense_time, num_queries, dense_batch_size),
-            dense_batch_stats,
-        ),
-        "hybrid_rrf_fusion_only": _latency_stats(hybrid_time, num_queries),
-        "hybrid_rrf_end_to_end": _latency_stats(bm25_time + dense_time + hybrid_time, num_queries),
-    }
-
-    dense_stats = retrieval_stats["dense_faiss"]
-
-    print_header("RETRIEVAL LATENCY STATS")
-    print_stat("BM25 retrieval time", f"{bm25_time:.2f}s")
-    print_stat("BM25 avg batch latency", f"{retrieval_stats['bm25s'].get('avg_batch_latency_seconds', 0):.4f}s (size: {bm25_batch_size})")
-    print_stat("BM25 avg query latency", f"{retrieval_stats['bm25s']['avg_latency_seconds_per_query']:.4f}s")
-    print_stat("BM25 p95 latency/query", _fmt_ms(retrieval_stats["bm25s"].get("p95_batch_latency_ms_per_query", 0.0)))
-    print_stat("BM25 QPS", f"{retrieval_stats['bm25s']['qps']:.2f}")
-
+    print_header("DENSE (FAISS) RETRIEVAL LATENCY")
     print_stat("Dense retrieval time", f"{dense_time:.2f}s")
-    print_stat("Dense encode time", f"{dense_stats.get('total_encode_seconds', 0):.2f}s")
-    print_stat("Dense FAISS search time", f"{dense_stats.get('total_search_seconds', 0):.2f}s")
-    print_stat("Dense avg batch latency", f"{dense_stats.get('avg_batch_latency_seconds', 0):.4f}s (size: {dense_batch_size})")
-    print_stat("Dense avg query latency", f"{dense_stats['avg_latency_seconds_per_query']:.4f}s")
-    print_stat("Dense avg encode/query", f"{dense_stats.get('avg_encode_seconds_per_query', 0):.4f}s")
-    print_stat("Dense avg FAISS/query", f"{dense_stats.get('avg_search_seconds_per_query', 0):.4f}s")
-    print_stat("Dense p95 latency/query", _fmt_ms(dense_stats.get("p95_batch_latency_ms_per_query", 0.0)))
-    print_stat("Dense QPS", f"{dense_stats['qps']:.2f}")
+    print_stat("Dense encode time", f"{stats.get('total_encode_seconds', 0):.2f}s")
+    print_stat("Dense FAISS search time", f"{stats.get('total_search_seconds', 0):.2f}s")
+    print_stat("Dense avg batch latency", f"{stats.get('avg_batch_latency_seconds', 0):.4f}s (size: {dense_batch_size})")
+    print_stat("Dense avg query latency", f"{stats['avg_latency_seconds_per_query']:.4f}s")
+    print_stat("Dense avg encode/query", f"{stats.get('avg_encode_seconds_per_query', 0):.4f}s")
+    print_stat("Dense avg FAISS/query", f"{stats.get('avg_search_seconds_per_query', 0):.4f}s")
+    print_stat("Dense p95 latency/query", _fmt_ms(stats.get("p95_batch_latency_ms_per_query", 0.0)))
+    print_stat("Dense QPS", f"{stats['qps']:.2f}")
 
-    print_stat("RRF fusion time", f"{hybrid_time:.2f}s")
-    print_stat("Hybrid end-to-end time", f"{retrieval_stats['hybrid_rrf_end_to_end']['total_seconds']:.2f}s")
-    print_stat("Hybrid avg query latency", f"{retrieval_stats['hybrid_rrf_end_to_end']['avg_latency_seconds_per_query']:.4f}s")
+    return dense_results, stats
 
-    return bm25_results, dense_results, hybrid_results, retrieval_stats
+
+def retrieval_for_eval(
+    mode,
+    query_texts,
+    top_k=100,
+    # Sparse args
+    bm25_retriever=None,
+    bm25_batch_size=512,
+    n_threads=-1,
+    chunk_size=128,
+    # Dense args
+    dense_retriever=None,
+    dense_batch_size=512,
+    dense_encode_batch_size=None,
+    dense_search_batch_size=None,
+    faiss_num_threads=None,
+    # Fusion args
+    fusion_strategy="rrf",
+    fusion_kwargs=None,
+):
+    """Run retrieval pipeline according to the selected mode.
+    
+    Args:
+        mode: 'sparse', 'dense', or 'hybrid'
+        query_texts: list of query strings
+        top_k: number of documents to retrieve per query
+        bm25_retriever: BM25SRetriever instance (required for sparse/hybrid)
+        dense_retriever: DenseFaissRetriever instance (required for dense/hybrid)
+        fusion_strategy: name of fusion strategy (only used in hybrid mode)
+        fusion_kwargs: extra kwargs passed to the fusion function (e.g. rrf_k, fusion_alpha)
+    
+    Returns:
+        (run_results_dict, retrieval_stats)
+        - run_results_dict: {display_name: results_list} for evaluation
+        - retrieval_stats: {component_name: stats_dict}
+    """
+    fusion_kwargs = fusion_kwargs or {}
+    run_results = {}
+    retrieval_stats = {}
+
+    # --- Sparse retrieval ---
+    if mode in ("sparse", "hybrid"):
+        if bm25_retriever is None:
+            raise ValueError("bm25_retriever is required for sparse/hybrid mode")
+        bm25_results, bm25_stats = _run_sparse_retrieval(
+            bm25_retriever, query_texts, top_k,
+            bm25_batch_size, n_threads, chunk_size,
+        )
+        run_results["BM25S"] = bm25_results
+        retrieval_stats["bm25s"] = bm25_stats
+
+    # --- Dense retrieval ---
+    if mode in ("dense", "hybrid"):
+        if dense_retriever is None:
+            raise ValueError("dense_retriever is required for dense/hybrid mode")
+        dense_results, dense_stats = _run_dense_retrieval(
+            dense_retriever, query_texts, top_k,
+            dense_batch_size, dense_encode_batch_size,
+            dense_search_batch_size, faiss_num_threads,
+        )
+        run_results["Dense FAISS"] = dense_results
+        retrieval_stats["dense_faiss"] = dense_stats
+
+    # --- Fusion (hybrid only) ---
+    if mode == "hybrid":
+        fusion_fn = get_fusion_fn(fusion_strategy)
+        
+        start = time.perf_counter()
+        hybrid_results = fusion_fn(
+            sparse_results=bm25_results,
+            dense_results=dense_results,
+            top_k=top_k,
+            **fusion_kwargs,
+        )
+        hybrid_time = time.perf_counter() - start
+
+        num_queries = len(query_texts)
+        bm25_time = retrieval_stats["bm25s"]["total_seconds"]
+        dense_time = retrieval_stats["dense_faiss"]["total_seconds"]
+
+        fusion_display_name = f"Hybrid {fusion_strategy.upper()}"
+        run_results[fusion_display_name] = hybrid_results
+        retrieval_stats[f"hybrid_{fusion_strategy}_fusion_only"] = _latency_stats(hybrid_time, num_queries)
+        retrieval_stats[f"hybrid_{fusion_strategy}_end_to_end"] = _latency_stats(
+            bm25_time + dense_time + hybrid_time, num_queries,
+        )
+
+        print_header(f"FUSION LATENCY ({fusion_strategy.upper()})")
+        print_stat("Fusion time", f"{hybrid_time:.2f}s")
+        print_stat("Hybrid end-to-end time", f"{bm25_time + dense_time + hybrid_time:.2f}s")
+        print_stat("Hybrid avg query latency",
+                    f"{retrieval_stats[f'hybrid_{fusion_strategy}_end_to_end']['avg_latency_seconds_per_query']:.4f}s")
+
+    return run_results, retrieval_stats
 
 
 # =========================
@@ -356,6 +453,11 @@ def main():
     METRICS = args.metrics
     validate_metrics(METRICS)
 
+    # Validate mode vs fusion_strategy
+    mode = args.mode
+    if mode != "hybrid" and args.fusion_strategy != "rrf":
+        print(f"\n⚠️  --fusion_strategy '{args.fusion_strategy}' is ignored in '{mode}' mode (only used in 'hybrid' mode).")
+
     print_header("EXPERIMENT CONFIGURATIONS")
     for k, v in vars(args).items():
         print_stat(k, v)
@@ -364,59 +466,85 @@ def main():
     # Download overrides the print internally, could suppress or leave alone
     corpus, queries, qrels = download_and_preview_msmarco(corpus_id=args.corpus_id, eval_id=args.eval_id)
 
+    # --- Load retrievers conditionally based on mode ---
     print_header("LOADING RETRIEVERS")
-    bm25_retriever = BM25SRetriever.load(
-        args.sparse_index_dir,
-        mmap=args.bm25_mmap,
-        tokenize_kwargs={},
-        backend=args.bm25_backend,
-        backend_selection=args.bm25_backend_selection,
-        n_threads=args.n_threads,
-    )
+    bm25_retriever = None
+    dense_retriever = None
 
-    dense_retriever = DenseFaissRetriever.load(
-        index_dir=args.dense_index_dir,
-        model_name=args.embedding_model,
-        batch_size=args.batch_size,
-        device=args.device,
-        normalize_embeddings=args.normalize_emb,
-        use_gpu=args.dense_use_gpu,
-        faiss_num_threads=args.faiss_num_threads,
-    )
+    if mode in ("sparse", "hybrid"):
+        print(f"   Loading sparse retriever (BM25S)...")
+        bm25_retriever = BM25SRetriever.load(
+            args.sparse_index_dir,
+            mmap=args.bm25_mmap,
+            tokenize_kwargs={},
+            backend=args.bm25_backend,
+            backend_selection=args.bm25_backend_selection,
+            n_threads=args.n_threads,
+        )
 
-    if args.hnsw_ef_search is not None and hasattr(dense_retriever, "set_hnsw_ef_search"):
-        dense_retriever.set_hnsw_ef_search(args.hnsw_ef_search)
-        print_stat("Dense HNSW efSearch", args.hnsw_ef_search)
+    if mode in ("dense", "hybrid"):
+        print(f"   Loading dense retriever (FAISS)...")
+        dense_retriever = DenseFaissRetriever.load(
+            index_dir=args.dense_index_dir,
+            model_name=args.embedding_model,
+            batch_size=args.batch_size,
+            device=args.device,
+            normalize_embeddings=args.normalize_emb,
+            use_gpu=args.dense_use_gpu,
+            faiss_num_threads=args.faiss_num_threads,
+        )
 
-    if args.ivf_nprobe is not None and hasattr(dense_retriever, "set_ivf_nprobe"):
-        dense_retriever.set_ivf_nprobe(args.ivf_nprobe)
-        print_stat("Dense IVF nprobe", args.ivf_nprobe)
+        if args.hnsw_ef_search is not None and hasattr(dense_retriever, "set_hnsw_ef_search"):
+            dense_retriever.set_hnsw_ef_search(args.hnsw_ef_search)
+            print_stat("Dense HNSW efSearch", args.hnsw_ef_search)
+
+        if args.ivf_nprobe is not None and hasattr(dense_retriever, "set_ivf_nprobe"):
+            dense_retriever.set_ivf_nprobe(args.ivf_nprobe)
+            print_stat("Dense IVF nprobe", args.ivf_nprobe)
+
+    if mode == "sparse":
+        print("   ⏭️  Dense retriever skipped (mode=sparse)")
+    elif mode == "dense":
+        print("   ⏭️  Sparse retriever skipped (mode=dense)")
 
     print_header("PREPARING TARGET QUERIES")
     eval_query_ids, eval_query_texts = prepare_eval_queries(queries=queries, qrels=qrels, max_queries=args.max_queries)
 
-    if args.dense_warmup and eval_query_texts:
+    if args.dense_warmup and dense_retriever is not None and eval_query_texts:
         print_header("WARMING UP DENSE RETRIEVER")
         dense_retriever.warmup(sample_query=eval_query_texts[0], top_k=min(args.top_k, 10), n_runs=3)
 
-    print_header(f"RUNNING RETRIEVAL PIPELINES (TOP K = {args.top_k})")
-    bm25_results, dense_results, hybrid_results, retrieval_stats = retrieval_for_eval(
-        bm25_retriever=bm25_retriever,
-        dense_retriever=dense_retriever,
+    # Build fusion kwargs
+    fusion_kwargs = {
+        "rrf_k": args.rrf_k,
+        "k": args.rrf_k,
+        "alpha": args.fusion_alpha,
+        "fusion_alpha": args.fusion_alpha,
+    }
+
+    print_header(f"RUNNING RETRIEVAL PIPELINE (MODE={mode.upper()}, TOP K={args.top_k})")
+    if mode == "hybrid":
+        print_stat("Fusion strategy", args.fusion_strategy)
+
+    run_results, retrieval_stats = retrieval_for_eval(
+        mode=mode,
         query_texts=eval_query_texts,
         top_k=args.top_k,
+        bm25_retriever=bm25_retriever,
         bm25_batch_size=args.bm25_batch_size,
+        n_threads=args.n_threads,
+        chunk_size=args.chunk_size,
+        dense_retriever=dense_retriever,
         dense_batch_size=args.dense_batch_size,
         dense_encode_batch_size=args.dense_encode_batch_size,
         dense_search_batch_size=args.dense_search_batch_size,
-        rrf_k=args.rrf_k,
-        n_threads=args.n_threads,
-        chunk_size=args.chunk_size,
         faiss_num_threads=args.faiss_num_threads,
+        fusion_strategy=args.fusion_strategy,
+        fusion_kwargs=fusion_kwargs,
     )
 
     print_header("EVALUATION METRICS (RANX)")
-    qrels_obj, runs = build_ranx_objects(eval_query_ids, qrels, bm25_results, dense_results, hybrid_results)
+    qrels_obj, runs = build_ranx_objects(eval_query_ids, qrels, run_results)
     scores_df = evaluate_runs(qrels_obj, runs, METRICS)
     
     # Use to_markdown if tabulate is installed, otherwise standard print
@@ -425,7 +553,9 @@ def main():
     except ImportError:
         print(scores_df)
 
-    coverage_df = qrels_coverage_report(eval_query_ids, qrels, bm25_retriever, dense_retriever)
+    # Coverage report — pass whichever retrievers were loaded
+    active_retrievers = [r for r in [bm25_retriever, dense_retriever] if r is not None]
+    coverage_df = qrels_coverage_report(eval_query_ids, qrels, *active_retrievers)
     if coverage_df is not None:
         print_header("COVERAGE REPORT")
         try:
@@ -433,11 +563,8 @@ def main():
         except ImportError:
             print(coverage_df)
 
-    run_dicts = {
-        "bm25s": make_run_dict(eval_query_ids, bm25_results),
-        "dense_faiss": make_run_dict(eval_query_ids, dense_results),
-        "hybrid_rrf": make_run_dict(eval_query_ids, hybrid_results),
-    }
+    # Build run_dicts for saving (use display names as keys)
+    run_dicts = {name: make_run_dict(eval_query_ids, results) for name, results in run_results.items()}
 
     save_experiment_artifacts(
         args=args,

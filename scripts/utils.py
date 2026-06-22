@@ -24,13 +24,22 @@ def make_qrels_dict(query_ids, qrels, keep_zero_relevance=False):
             qrels_out[qid] = filtered
     return qrels_out
 
-def build_ranx_objects(query_ids, qrels, bm25_results, dense_results, hybrid_results):
+def build_ranx_objects(query_ids, qrels, run_results_dict):
+    """Build ranx Qrels and Run objects from a flexible dict of results.
+    
+    Args:
+        query_ids: list of query IDs
+        qrels: dict of {qid: {doc_id: rel}}
+        run_results_dict: dict of {run_display_name: results_list}
+            e.g. {"BM25S": [...], "Dense FAISS": [...], "Hybrid RRF": [...]}
+    
+    Returns:
+        (Qrels, dict of {run_name: Run})
+    """
     qrels_obj = Qrels(make_qrels_dict(query_ids, qrels))
-    runs = {
-        "BM25S": Run(make_run_dict(query_ids, bm25_results), name="BM25S"),
-        "Dense FAISS": Run(make_run_dict(query_ids, dense_results), name="Dense FAISS"),
-        "Hybrid RRF": Run(make_run_dict(query_ids, hybrid_results), name="Hybrid RRF"),
-    }
+    runs = {}
+    for run_name, results in run_results_dict.items():
+        runs[run_name] = Run(make_run_dict(query_ids, results), name=run_name)
     return qrels_obj, runs
 
 def evaluate_runs(qrels_obj, runs, metrics):
@@ -128,10 +137,9 @@ def save_experiment_artifacts(args, run_id, save_path, query_ids, qrels, run_dic
 
     per_run_metric_paths = {}
     for run_name in run_dicts.keys():
-        score_index = {"bm25s": "BM25S", "dense_faiss": "Dense FAISS", "hybrid_rrf": "Hybrid RRF"}.get(run_name, run_name)
-        if score_index in scores_df.index:
+        if run_name in scores_df.index:
             per_run_path = metrics_dir / f"{run_name}_metrics.json"
-            save_json(scores_df.loc[score_index].to_dict(), per_run_path)
+            save_json(scores_df.loc[run_name].to_dict(), per_run_path)
             per_run_metric_paths[run_name] = str(per_run_path)
 
     coverage_path = None
@@ -144,7 +152,8 @@ def save_experiment_artifacts(args, run_id, save_path, query_ids, qrels, run_dic
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "num_eval_queries": len(query_ids),
-        "fusion_method": "rrf",
+        "retrieval_mode": config.get("mode", "hybrid"),
+        "fusion_method": config.get("fusion_strategy", "rrf") if config.get("mode", "hybrid") == "hybrid" else None,
     })
     
     config_path = config_dir / "run_config.json"

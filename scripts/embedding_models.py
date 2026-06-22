@@ -3,6 +3,7 @@
 # -----------------------------------------------------------------------------
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
+from sentence_transformers import SentenceTransformer, models
     
 
 
@@ -13,6 +14,7 @@ class EmbeddingModelConfig:
     query_prefix: str = ""
     doc_prompt_name: Optional[str] = None
     query_prompt_name: Optional[str] = None
+    pool_type: Optional[str] = None
     trust_remote_code: bool = False
     normalize: bool = True
     max_seq_length: Optional[int] = None
@@ -145,4 +147,30 @@ MODEL_REGISTRY: Dict[str, EmbeddingModelConfig] = {
         normalize=True,
         note="Fast lower-bound baseline.",
     ),
+
+    "co-condenser-marco": EmbeddingModelConfig(
+        model_id="Luyu/co-condenser-marco",
+        normalize=True,
+        pool_type='cls'
+    )
 }
+
+def create_embedding_model(model_id: str, pool_type: str, normalize: bool, trust_remote_code: bool=True, model_kwargs: dict = {}     ):
+    if pool_type is None:
+        model = SentenceTransformer(
+            model_id,
+            device="cuda",
+            trust_remote_code=trust_remote_code,
+            model_kwargs=model_kwargs,
+        )
+    else:
+        word_embedding_model = models.Transformer(model_id, trust_remote_code=trust_remote_code, model_kwargs=model_kwargs)
+        pooling_model = models.Pooling(
+            word_embedding_model.get_embedding_dimension(),
+            pooling_mode=pool_type,
+        )
+        model = SentenceTransformer(
+            modules=[word_embedding_model, pooling_model],
+            device='cuda'
+        )
+    return model    

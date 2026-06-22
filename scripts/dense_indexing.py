@@ -32,9 +32,9 @@ import faiss
 import ir_datasets
 import numpy as np
 import torch
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, models
 from tqdm import tqdm
-from embedding_models import MODEL_REGISTRY, EmbeddingModelConfig
+from embedding_models import EmbeddingModelConfig, create_embedding_model, MODEL_REGISTRY
 
 # -----------------------------------------------------------------------------
 # 2. Arguments and utilities
@@ -49,7 +49,6 @@ def parse_args() -> argparse.Namespace:
         "--model_key",
         type=str,
         default="bge_small",
-        choices=sorted(MODEL_REGISTRY.keys()),
         help="Key from MODEL_REGISTRY.",
     )
     parser.add_argument(
@@ -244,12 +243,7 @@ def build_sentence_transformer(
     if args.attn_implementation is not None:
         model_kwargs["attn_implementation"] = args.attn_implementation
 
-    model = SentenceTransformer(
-        cfg.model_id,
-        device=device,
-        trust_remote_code=cfg.trust_remote_code,
-        model_kwargs=model_kwargs,
-    )
+    model = create_embedding_model(cfg.model_id, cfg.pool_type, cfg.normalize, trust_remote_code=cfg.trust_remote_code, model_kwargs=model_kwargs)
 
     max_seq_length = args.max_seq_length or cfg.max_seq_length
     if max_seq_length is not None:

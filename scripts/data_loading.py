@@ -48,3 +48,9 @@ def download_and_preview_msmarco(corpus_id="msmarco-passage", eval_id="msmarco-p
     print(f"Total qrels queries loaded: {len(qrels):,}")
 
     return corpus, queries, qrels
+
+
+if __name__ == '__main__':
+    dataset_id = 'mmarco/v2/vi'
+    eval_id = 'mmarco/v2/vi/dev/small'
+    corpus, queries, qrels = download_and_preview_msmarco(eval_id)

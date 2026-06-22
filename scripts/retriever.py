@@ -10,13 +10,45 @@ import numpy as np
 import time
 import faiss
 from sentence_transformers import SentenceTransformer
+import Stemmer
+
+
+def custom_tokenize(texts, **tokenize_kwargs):
+    """
+    Tokenize texts using bm25s.tokenize, supporting custom 'splitter' callback
+    in tokenize_kwargs.
+    """
+    if "splitter" in tokenize_kwargs:
+        splitter = tokenize_kwargs["splitter"]
+        kwargs = tokenize_kwargs.copy()
+        kwargs.pop("splitter")
+        
+        if isinstance(texts, str):
+            tokenized = [splitter(texts)]
+        else:
+            if not isinstance(texts, list):
+                texts = list(texts)
+            if len(texts) > 0:
+                first_element = texts[0]
+                if not isinstance(first_element, str) and hasattr(first_element, "__iter__"):
+                    tokenized = texts
+                else:
+                    tokenized = [splitter(t) for t in texts]
+            else:
+                tokenized = []
+        return bm25s.tokenize(tokenized, **kwargs)
+    else:
+        return bm25s.tokenize(texts, **tokenize_kwargs)
 
 
 class BM25SRetriever:
     def __init__(self, corpus=None, tokenize_kwargs=None, backend="auto", backend_selection="auto", n_threads=-1):
         self.doc_ids = None
         self.doc_texts = None
-        self.tokenize_kwargs = tokenize_kwargs or {}
+        self.tokenize_kwargs = tokenize_kwargs or {
+            "stemmer": Stemmer.Stemmer('english'),
+            "stopwords": "english",
+        }
         self.backend_selection = backend_selection
         self.n_threads = n_threads
         self.retriever = bm25s.BM25(backend=backend)
@@ -27,7 +59,7 @@ class BM25SRetriever:
     def build(self):
         if self.doc_texts is None:
             raise ValueError("corpus is required to build BM25 index")
-        corpus_tokens = bm25s.tokenize(self.doc_texts, **self.tokenize_kwargs)
+        corpus_tokens = custom_tokenize(self.doc_texts, **self.tokenize_kwargs)
         self.retriever.index(corpus_tokens)
         print(f"Indexed {len(self.doc_texts):,} documents")
 
@@ -75,7 +107,7 @@ class BM25SRetriever:
     def tokenize_queries(self, queries):
         if isinstance(queries, str):
             queries = [queries]
-        return bm25s.tokenize(queries, **self.tokenize_kwargs)
+        return custom_tokenize(queries, **self.tokenize_kwargs)
 
     def retrieve_tokens(self, query_tokens, top_k=100, return_dict=True, n_threads=None, chunk_size=128):
         if self.doc_ids is None:
