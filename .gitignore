@@ -11,3 +11,4 @@ mxbai_large_embedding_faiss
 qwen3_4b_embedding_faiss
 msmarco_regex_wordlevel_tokenizer
 paraphrased_queries
+co_condenser_marco_embedding_faiss
