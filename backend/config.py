@@ -25,6 +25,8 @@ METADATA_DB = os.environ.get(
 
 # Embedding model settings
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+# Reranker model settings
+RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base")
 # DEVICE = os.environ.get("DEVICE", "cuda")  # "cuda" or "cpu"
 DEVICE = 'cuda:1'
 DENSE_USE_GPU = os.environ.get("DENSE_USE_GPU", "true").lower() in ("true", "1", "yes")

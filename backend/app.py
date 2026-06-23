@@ -21,7 +21,7 @@ if scripts_path not in sys.path:
     sys.path.insert(0, scripts_path)
 
 import config
-from retriever import BM25SRetriever, DenseFaissRetriever
+from retriever import BM25SRetriever, DenseFaissRetriever, CrossEncoderReranker
 from fusion import get_fusion_fn, list_strategies
 
 app = FastAPI(
@@ -42,6 +42,7 @@ app.add_middleware(
 # Global variables for loaded objects
 bm25_retriever = None
 dense_retriever = None
+reranker = None
 docs_store = None
 metadata_db_path = None
 dense_loaded = False
@@ -50,7 +51,7 @@ dense_load_error = None
 # Lifespan/Startup Initialization
 @app.on_event("startup")
 def startup_event():
-    global bm25_retriever, dense_retriever, docs_store, metadata_db_path, dense_loaded, dense_load_error
+    global bm25_retriever, dense_retriever, reranker, docs_store, metadata_db_path, dense_loaded, dense_load_error
 
     # 1. Load Sparse Retriever (BM25S)
     print("Loading sparse index (BM25S)...")
@@ -101,6 +102,15 @@ def startup_event():
         dense_load_error = f"Dense index directory {config.DENSE_INDEX_DIR} does not exist."
         print(f"Warning: {dense_load_error}")
 
+    # 2.5 Load Reranker
+    print("Loading reranker...")
+    try:
+        reranker = CrossEncoderReranker(model_name=config.RERANKER_MODEL, device=config.DEVICE)
+        print("Successfully loaded reranker.")
+    except Exception as e:
+        print(f"Error loading reranker: {e}")
+        traceback.print_exc()
+
     # 3. Load ir_datasets docs store for passage lookups (disk-backed, low RAM)
     print(f"Loading ir_datasets docs store for corpus: {config.CORPUS_ID}...")
     try:
@@ -128,6 +138,8 @@ class SearchRequest(BaseModel):
     fusion_strategy: str = Field(default="rrf", description="rrf | weighted_sum | combsum | combmnz | borda")
     rrf_k: int = Field(default=60, ge=1)
     fusion_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    rerank: bool = Field(default=False, description="Enable CrossEncoder reranking")
+    rerank_top_k: int = Field(default=100, ge=1, le=1000)
     date_from: Optional[str] = Field(default=None, description="Filter: min written_date (YYYY-MM-DD)")
     date_to: Optional[str] = Field(default=None, description="Filter: max written_date (YYYY-MM-DD)")
 
@@ -144,6 +156,7 @@ class LatencyStats(BaseModel):
     sparse_ms: Optional[float] = None
     dense_ms: Optional[float] = None
     fusion_ms: Optional[float] = None
+    rerank_ms: Optional[float] = None
 
 class SearchResponse(BaseModel):
     query: str
@@ -253,6 +266,7 @@ def search(req: SearchRequest):
     sparse_ms = None
     dense_ms = None
     fusion_ms = None
+    rerank_ms = None
     final_results = {}  # doc_id -> score
 
     # 1. Sparse Search
@@ -337,6 +351,35 @@ def search(req: SearchRequest):
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error executing fusion: {str(e)}")
 
+    # 3.5 Reranking
+    if req.rerank:
+        if reranker is None:
+            raise HTTPException(status_code=503, detail="Reranker is not loaded on backend.")
+        
+        t0_rerank = time.perf_counter()
+        try:
+            sorted_for_rerank = sorted(final_results.items(), key=lambda item: item[1], reverse=True)[:req.rerank_top_k]
+            temp_corpus = {}
+            for doc_id, _ in sorted_for_rerank:
+                if docs_store is not None:
+                    try:
+                        doc = docs_store.get(doc_id)
+                        if doc is not None:
+                            temp_corpus[doc_id] = doc.text
+                    except Exception:
+                        pass
+                        
+            final_results = reranker.rerank(
+                queries=[req.query],
+                run_dict_list=[final_results],
+                corpus=temp_corpus,
+                top_k=req.rerank_top_k
+            )[0]
+            rerank_ms = (time.perf_counter() - t0_rerank) * 1000.0
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error executing reranking: {str(e)}")
+
     # 4. Format outputs and lookup passage texts
     results_list = []
     # Sort doc_ids by score descending
@@ -398,6 +441,7 @@ def search(req: SearchRequest):
             sparse_ms=sparse_ms,
             dense_ms=dense_ms,
             fusion_ms=fusion_ms,
+            rerank_ms=rerank_ms,
         ),
         fusion_strategy=req.fusion_strategy if mode == "hybrid" else None,
         num_results=len(results_list),

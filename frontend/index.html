@@ -137,6 +137,25 @@
                             </div>
                             <span class="setting-desc">Filter retrieved passages by their written date (optional)</span>
                         </div>
+
+                        <!-- Neural Reranking -->
+                        <div class="setting-item setting-item-full">
+                            <label><i class="fa-solid fa-layer-group"></i> Neural Reranking</label>
+                            <div class="rerank-controls" style="display: flex; gap: 20px; align-items: center; margin-top: 10px;">
+                                <div class="checkbox-group">
+                                    <input type="checkbox" id="rerank-toggle">
+                                    <label for="rerank-toggle">Enable CrossEncoder Reranking</label>
+                                </div>
+                                <div class="slider-group" style="flex: 1;">
+                                    <label for="rerank-k-slider" style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                                        <span>Rerank Top-K</span>
+                                        <span class="val-display" id="rerank-k-val">100</span>
+                                    </label>
+                                    <input type="range" id="rerank-k-slider" min="10" max="1000" value="100" step="10" style="width: 100%;">
+                                </div>
+                            </div>
+                            <span class="setting-desc">Applies CrossEncoder reranking to the top retrieved results for higher accuracy.</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -162,6 +181,11 @@
                 </div>
                 <div class="stat-card glass-panel" id="stat-fusion">
                     <span class="stat-label">Fusion Processing</span>
+                    <span class="stat-value">-- ms</span>
+                    <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
+                </div>
+                <div class="stat-card glass-panel" id="stat-rerank" style="display: none;">
+                    <span class="stat-label">CrossEncoder Rerank</span>
                     <span class="stat-value">-- ms</span>
                     <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
                 </div>

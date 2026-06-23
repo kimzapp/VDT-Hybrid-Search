@@ -24,10 +24,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const fusionAlphaSlider = document.getElementById("fusion-alpha-slider");
     const fusionAlphaVal = document.getElementById("fusion-alpha-val");
 
-    // Date Filter Elements
     const dateFromInput = document.getElementById("date-from");
     const dateToInput = document.getElementById("date-to");
     const clearDatesBtn = document.getElementById("clear-dates");
+
+    // Rerank Elements
+    const rerankToggle = document.getElementById("rerank-toggle");
+    const rerankKSlider = document.getElementById("rerank-k-slider");
+    const rerankKVal = document.getElementById("rerank-k-val");
 
     // Latency Elements
     const statsDashboard = document.getElementById("stats-dashboard");
@@ -132,6 +136,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     fusionAlphaSlider.addEventListener("input", (e) => {
         fusionAlphaVal.textContent = parseFloat(e.target.value).toFixed(2);
+    });
+
+    rerankKSlider.addEventListener("input", (e) => {
+        rerankKVal.textContent = e.target.value;
     });
 
     // 4b. Clear date filters button
@@ -249,6 +257,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 fusion_strategy: strategy,
                 rrf_k: rrf_k,
                 fusion_alpha: fusion_alpha,
+                rerank: rerankToggle.checked,
+                rerank_top_k: parseInt(rerankKSlider.value, 10),
             };
             if (date_from) reqBody.date_from = date_from;
             if (date_to) reqBody.date_to = date_to;
@@ -563,13 +573,22 @@ document.addEventListener("DOMContentLoaded", () => {
         updateStatCard(statDense, currentMode !== "sparse" ? lat.dense_ms : 0.0, "Dense Encoding & FAISS");
         updateStatCard(statFusion, currentMode === "hybrid" ? lat.fusion_ms : 0.0, "Fusion Processing");
 
+        const statRerank = document.getElementById("stat-rerank");
+        if (lat.rerank_ms !== undefined && lat.rerank_ms !== null) {
+            statRerank.style.display = "flex";
+            updateStatCard(statRerank, lat.rerank_ms, "CrossEncoder Rerank");
+        } else {
+            statRerank.style.display = "none";
+        }
+
         // Set relative progress fills
-        const maxVal = Math.max(lat.total_ms, lat.sparse_ms, lat.dense_ms, lat.fusion_ms, 10);
+        const maxVal = Math.max(lat.total_ms, lat.sparse_ms || 0, lat.dense_ms || 0, lat.fusion_ms || 0, lat.rerank_ms || 0, 10);
         
         setFillWidth(statTotal, (lat.total_ms / maxVal) * 100);
         setFillWidth(statSparse, currentMode !== "dense" ? (lat.sparse_ms / maxVal) * 100 : 0);
         setFillWidth(statDense, currentMode !== "sparse" ? (lat.dense_ms / maxVal) * 100 : 0);
         setFillWidth(statFusion, currentMode === "hybrid" ? (lat.fusion_ms / maxVal) * 100 : 0);
+        setFillWidth(statRerank, (lat.rerank_ms !== undefined && lat.rerank_ms !== null) ? (lat.rerank_ms / maxVal) * 100 : 0);
     }
 
     function updateStatCard(cardElement, val, label) {
