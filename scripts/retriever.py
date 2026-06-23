@@ -809,7 +809,7 @@ class CrossEncoderReranker:
         self.device = device
         self.model, self.config = create_reranker_model(model_name, device=device)
 
-    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None, final_top_k=None):
+    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None, final_top_k=None, wcr=False, wcr_alpha=0.5):
         """
         Reranks a list of run dictionaries.
         
@@ -820,6 +820,8 @@ class CrossEncoderReranker:
             top_k: number of top documents to rerank for each query
             batch_size: batch size for CrossEncoder inference
             final_top_k: number of top documents to retain after reranking
+            wcr: whether to apply Weighted Combination of two-stage Ranking
+            wcr_alpha: weight for the retrieval score in WCR (0.0 to 1.0)
         
         Returns:
             list of reranked run dictionaries
@@ -827,38 +829,71 @@ class CrossEncoderReranker:
         if batch_size is None:
             batch_size = self.config.default_batch_size
             
-        reranked_run_dict_list = []
+        all_sentence_pairs = []
+        query_metadata = []
         
-        for query, run_dict in tqdm(zip(queries, run_dict_list), total=len(queries), desc="Reranking"):
+        # Prepare all sentence pairs across all queries
+        for query, run_dict in tqdm(zip(queries, run_dict_list), total=len(queries), desc="Preparing rerank pairs"):
             # Sort the current run_dict by score descending and take top_k
             sorted_docs = sorted(run_dict.items(), key=lambda x: x[1], reverse=True)
             top_docs_to_rerank = sorted_docs[:top_k]
             remaining_docs = sorted_docs[top_k:]
             
-            # Form sentence pairs for the top_k docs
-            sentence_pairs = []
-            doc_ids_to_rerank = []
-            for doc_id, _ in top_docs_to_rerank:
+            actual_top_docs = []
+            start_idx = len(all_sentence_pairs)
+            for doc_id, original_score in top_docs_to_rerank:
                 if doc_id in corpus:
                     doc_text = corpus[doc_id]
-                    sentence_pairs.append([query, doc_text])
-                    doc_ids_to_rerank.append(doc_id)
+                    all_sentence_pairs.append([query, doc_text])
+                    actual_top_docs.append((doc_id, original_score))
                 else:
                     # In case the document is not found in corpus (should not happen)
                     print(f"Warning: doc_id {doc_id} not found in corpus.")
+            end_idx = len(all_sentence_pairs)
             
-            if not sentence_pairs:
-                reranked_run_dict_list.append(run_dict)
+            query_metadata.append((actual_top_docs, remaining_docs, start_idx, end_idx, run_dict))
+            
+        # Compute cross-encoder scores for all pairs at once
+        if all_sentence_pairs:
+            print(f"   Running batched CrossEncoder inference on {len(all_sentence_pairs)} pairs...")
+            all_scores = self.model.predict(all_sentence_pairs, batch_size=batch_size, show_progress_bar=True)
+        else:
+            all_scores = []
+            
+        reranked_run_dict_list = []
+        
+        # Reconstruct run dictionaries
+        for actual_top_docs, remaining_docs, start_idx, end_idx, original_run_dict in query_metadata:
+            if start_idx == end_idx:
+                reranked_run_dict_list.append(original_run_dict)
                 continue
                 
-            # Compute cross-encoder scores
-            scores = self.model.predict(sentence_pairs, batch_size=batch_size, show_progress_bar=False)
-            
-            # Re-build the run dict
+            scores = all_scores[start_idx:end_idx]
             new_run_dict = {}
-            # Add reranked docs
-            for doc_id, score in zip(doc_ids_to_rerank, scores):
-                new_run_dict[doc_id] = float(score)
+            
+            if wcr:
+                # Min-max normalize retrieval scores
+                retrieval_scores = [score for _, score in actual_top_docs]
+                min_ret = min(retrieval_scores) if retrieval_scores else 0
+                max_ret = max(retrieval_scores) if retrieval_scores else 0
+                
+                # Min-max normalize rerank scores
+                min_rerank = min(scores) if len(scores) > 0 else 0
+                max_rerank = max(scores) if len(scores) > 0 else 0
+                
+                # Combine
+                for (doc_id, original_score), rerank_score in zip(actual_top_docs, scores):
+                    norm_ret = (original_score - min_ret) / (max_ret - min_ret) if max_ret > min_ret else 0.5
+                    norm_rerank = (rerank_score - min_rerank) / (max_rerank - min_rerank) if max_rerank > min_rerank else 0.5
+                    combined_score = wcr_alpha * norm_ret + (1.0 - wcr_alpha) * norm_rerank
+                    new_run_dict[doc_id] = float(combined_score)
+                
+                # Update scores array for the remaining logic shift
+                scores = list(new_run_dict.values())
+            else:
+                # Add reranked docs
+                for (doc_id, _), score in zip(actual_top_docs, scores):
+                    new_run_dict[doc_id] = float(score)
                 
             # Append remaining documents with lower scores so they don't affect top_k reranked results
             # but are still available for deep metrics like recall@1000

@@ -183,6 +183,8 @@ def parse_args():
     parser.add_argument("--rerank_top_k", type=int, default=100, help="Number of top documents to rerank per query")
     parser.add_argument("--final_top_k", type=int, default=None, help="Number of top documents to retain after reranking")
     parser.add_argument("--rerank_batch_size", type=int, default=64, help="Batch size for the CrossEncoder reranker")
+    parser.add_argument("--wcr", action="store_true", help="Enable weighted combination of retrieval and reranking scores (WCR)")
+    parser.add_argument("--wcr_alpha", type=float, default=0.5, help="Weight for the retrieval score in WCR (default: 0.5)")
     
     # Batch sizes and model settings
     parser.add_argument("--batch_size", type=int, default=128, help="Default encode batch size used by SentenceTransformer")
@@ -621,11 +623,14 @@ def main():
                 corpus=corpus,
                 top_k=args.rerank_top_k,
                 batch_size=args.rerank_batch_size,
-                final_top_k=args.final_top_k
+                final_top_k=args.final_top_k,
+                wcr=args.wcr,
+                wcr_alpha=args.wcr_alpha
             )
             rerank_time = time.perf_counter() - start
             print_stat(f"   {run_name} Rerank time", f"{rerank_time:.2f}s")
-            reranked_run_results[f"{run_name} + Rerank"] = new_run_dict_list
+            new_name = f"{run_name} + Rerank (WCR)" if args.wcr else f"{run_name} + Rerank"
+            reranked_run_results[new_name] = new_run_dict_list
             retrieval_stats[f"{run_name}_rerank_only"] = _latency_stats(rerank_time, len(raw_eval_query_texts))
             
         run_results.update(reranked_run_results)
