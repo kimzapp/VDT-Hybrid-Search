@@ -1,0 +1,8 @@
+/home/rmits/VDT-Hybrid-Search/bge_small_en_v1.5_embedding_faiss
+/home/rmits/VDT-Hybrid-Search/bm25_index
+/home/rmits/VDT-Hybrid-Search/bm25_index_vi
+/home/rmits/VDT-Hybrid-Search/cache
+/home/rmits/VDT-Hybrid-Search/dense_index_vi
+/home/rmits/VDT-Hybrid-Search/paraphrased_queries
+/home/rmits/VDT-Hybrid-Search/runs
+/home/rmits/VDT-Hybrid-Search/metadata_sqlite

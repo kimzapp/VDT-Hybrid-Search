@@ -1,0 +1,7 @@
+bge_small_en_v1.5_embedding_faiss.zip: https://drive.google.com/open?id=1cRext5L6n6wfzX2rnFctcvZac4Q-p_In
+bm25_index.zip: https://drive.google.com/open?id=1eglaqwloGB3m02QxHnMbqnLFzXHNJAqb
+bm25_index_vi.zip: https://drive.google.com/open?id=1cEcwGtloy_mfo2ljlFpY140tsgM7Xfiw
+cache.zip: https://drive.google.com/open?id=1X0dtLmejxI3QVN8jx7fQwMDpE-6KEI7L
+dense_index_vi.zip: https://drive.google.com/open?id=1IhYBymIpM9ZzGaWMffLC3douQcj-NCPT
+paraphrased_queries.zip: https://drive.google.com/open?id=1qLwbCScylC9TUUbHT8oiTiVQPVdoXS6i
+runs.zip: https://drive.google.com/open?id=1fSOfiqSa6pmc0WARBj_ZfbxhnJSmdJWE
