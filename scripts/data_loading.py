@@ -21,6 +21,14 @@ def preview_iter(title, iterator, fields, n=5):
 
 
 def download_and_preview_msmarco(corpus_id="msmarco-passage", eval_id="msmarco-passage/dev/small", n_samples=1):
+    # Auto-register paraphrased datasets if eval_id refers to one.
+    # Registration only lives in-process, so we must re-register every time.
+    if "/paraphrased/" in eval_id:
+        from query_paraphrase import register_paraphrased_datasets
+        # Derive the base eval_id by stripping "/paraphrased/<strategy>"
+        base_eval_id = eval_id.split("/paraphrased/")[0]
+        register_paraphrased_datasets(eval_id=base_eval_id)
+
     passages = ir_datasets.load(corpus_id)
     eval_set = ir_datasets.load(eval_id)
 

@@ -5,6 +5,8 @@ import time
 import sys
 from datetime import datetime
 
+from vi_corpus_segment import normalize_vi_text
+
 # Parse --target_devices early to set CUDA_VISIBLE_DEVICES before importing torch/faiss
 if "--target_devices" in sys.argv:
     idx = sys.argv.index("--target_devices")
@@ -45,6 +47,30 @@ SUPPORTED_METRICS = [
 DEFAULT_METRICS = ["mrr@10", "ndcg@10", "precision@10", "recall@10", "recall@100", "map@100"]
 
 RETRIEVAL_MODES = ["hybrid", "sparse", "dense"]
+
+# Vietnamese corpus detection
+VI_CORPUS_PREFIXES = ("mmarco/v2/vi",)
+
+
+def is_vi_corpus(corpus_id: str) -> bool:
+    """Check if the corpus ID corresponds to a Vietnamese dataset."""
+    return any(corpus_id.startswith(prefix) for prefix in VI_CORPUS_PREFIXES)
+
+
+def preprocess_vi_queries(query_texts: list[str]) -> list[str]:
+    """Apply Vietnamese preprocessing to queries: NFC normalize + word segmentation.
+    
+    This mirrors the preprocessing applied to the corpus during index creation
+    in vi_corpus_segment.py (normalize_vi_text + underthesea.word_tokenize).
+    """
+    from underthesea import word_tokenize
+
+    processed = []
+    for text in query_texts:
+        normalized = normalize_vi_text(text)
+        segmented = word_tokenize(normalized, format="text")
+        processed.append(segmented)
+    return processed
 
 
 def _parse_metric_name(metric_str):
@@ -215,6 +241,12 @@ class Logger:
     def flush(self):
         self.terminal.flush()
         self.log.flush()
+
+    def isatty(self):
+        return self.terminal.isatty()
+
+    def __getattr__(self, attr):
+        return getattr(self.terminal, attr)
 
 def print_header(title):
     print(f"\n{'='*80}")
@@ -471,12 +503,23 @@ def main():
     bm25_retriever = None
     dense_retriever = None
 
+    vi_mode = is_vi_corpus(args.corpus_id)
+    if vi_mode:
+        print(f"   🇻🇳 Vietnamese corpus detected — will apply word segmentation to queries")
+
     if mode in ("sparse", "hybrid"):
         print(f"   Loading sparse retriever (BM25S)...")
+        # For Vietnamese index: use str.split (matching the index tokenizer),
+        # no stemmer, no stopwords — the text is already segmented.
+        bm25_tokenize_kwargs = (
+            {"splitter": str.split, "stopwords": [], "stemmer": None}
+            if vi_mode
+            else {}
+        )
         bm25_retriever = BM25SRetriever.load(
             args.sparse_index_dir,
             mmap=args.bm25_mmap,
-            tokenize_kwargs={},
+            tokenize_kwargs=bm25_tokenize_kwargs,
             backend=args.bm25_backend,
             backend_selection=args.bm25_backend_selection,
             n_threads=args.n_threads,
@@ -509,6 +552,15 @@ def main():
 
     print_header("PREPARING TARGET QUERIES")
     eval_query_ids, eval_query_texts = prepare_eval_queries(queries=queries, qrels=qrels, max_queries=args.max_queries)
+
+    # Apply Vietnamese preprocessing to queries if needed
+    if vi_mode:
+        print(f"   Preprocessing {len(eval_query_texts):,} queries with Vietnamese word segmentation...")
+        eval_query_texts = preprocess_vi_queries(eval_query_texts)
+        print(f"   ✅ Query preprocessing complete")
+        # Show a sample preprocessed query
+        if eval_query_texts:
+            print(f"   Sample preprocessed query: {eval_query_texts[0][:120]}")
 
     if args.dense_warmup and dense_retriever is not None and eval_query_texts:
         print_header("WARMING UP DENSE RETRIEVER")

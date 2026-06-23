@@ -636,8 +636,37 @@ def register_paraphrased_datasets(
             original_ds,          # provides docs_handler & qrels_handler
         )
 
+        # Skip if already registered (e.g., by register_filtered_datasets in same process)
+        if dataset_id in ir_datasets.registry:
+            registered.append(dataset_id)
+            continue
+
         ir_datasets.registry.register(dataset_id, dataset)
         registered.append(dataset_id)
+
+    # Also register custom/filtered datasets listed in registry_map.json
+    registry_map_path = os.path.join(paraphrase_dir, "registry_map.json")
+    if os.path.exists(registry_map_path):
+        with open(registry_map_path, "r", encoding="utf-8") as f:
+            registry_map = json.load(f)
+        registered_ids = set(registered)
+        for ds_id, tsv_filename in registry_map.items():
+            if ds_id in registered_ids:
+                continue
+            # Only register datasets that match the current eval_id prefix
+            if not ds_id.startswith(eval_id):
+                continue
+            tsv_path = os.path.join(paraphrase_dir, tsv_filename)
+            if not os.path.exists(tsv_path):
+                continue
+            # Skip if already registered in this process
+            if ds_id in ir_datasets.registry:
+                registered.append(ds_id)
+                continue
+            queries_constituent = _InMemoryQueriesHandler(tsv_path)
+            dataset = Dataset(queries_constituent, original_ds)
+            ir_datasets.registry.register(ds_id, dataset)
+            registered.append(ds_id)
 
     if registered:
         print(f"   Registered {len(registered)} paraphrased datasets:")
@@ -796,6 +825,178 @@ def compute_all_similarities(
               f"Min={scores.min():.4f}  Max={scores.max():.4f}")
 
     return all_similarities
+
+
+# =============================================================================
+# Phase 2.5: Filter Queries by Similarity Threshold
+# =============================================================================
+
+def filter_queries_by_threshold(
+    strategies: List[str],
+    original_queries: Dict[str, str],
+    all_similarities: Dict[str, Dict[str, float]],
+    output_dir: str,
+    threshold: float,
+    subset_name: Optional[str] = None,
+    embedding_model_name: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Filter paraphrased queries, keeping only those with similarity >= threshold.
+
+    Queries below the threshold are EXCLUDED from the filtered set.
+    This produces a subset of high-quality paraphrases for robust evaluation.
+
+    Args:
+        strategies: List of strategy names to filter.
+        original_queries: Dict of original query_id -> query_text.
+        all_similarities: Dict of strategy -> {query_id: similarity_score}.
+        output_dir: Directory containing paraphrased TSV files.
+        threshold: Minimum cosine similarity to keep a paraphrase.
+        subset_name: Optional custom name for the filtered subset.
+        embedding_model_name: Name of the embedding model used for similarities.
+
+    Returns:
+        Dict mapping strategy_name -> path to filtered TSV file.
+    """
+    import numpy as np
+
+    print("\n" + "=" * 70)
+    print(f"🔍 Phase 4 — Filtering paraphrased queries (similarity ≥ {threshold:.2f})")
+    if embedding_model_name:
+        print(f"   Embedding model: {embedding_model_name}")
+    print("=" * 70)
+
+    filtered_paths = OrderedDict()
+
+    for strategy in strategies:
+        if strategy not in all_similarities:
+            print(f"\n   ⚠️  {strategy}: no similarities computed, skipping filter")
+            continue
+
+        similarities = all_similarities[strategy]
+        tsv_path = os.path.join(output_dir, STRATEGY_FILE_MAP[strategy])
+        if not os.path.exists(tsv_path):
+            print(f"\n   ⚠️  {strategy}: TSV not found at {tsv_path}, skipping")
+            continue
+
+        paraphrased = load_queries_tsv(tsv_path)
+
+        # Filter: keep only queries with similarity >= threshold
+        filtered = OrderedDict()
+        kept_sims = []
+        excluded_sims = []
+
+        for qid, text in paraphrased.items():
+            sim = similarities.get(qid, 0.0)
+            if sim >= threshold:
+                filtered[qid] = text
+                kept_sims.append(sim)
+            else:
+                excluded_sims.append(sim)
+
+        # Generate output filename
+        if subset_name:
+            if len(strategies) > 1:
+                filtered_filename = f"{subset_name}_{strategy}_queries.tsv"
+            else:
+                filtered_filename = f"{subset_name}_queries.tsv"
+        else:
+            thresh_tag = f"{threshold:.2f}".replace(".", "")
+            filtered_filename = f"{strategy}_filtered_t{thresh_tag}_queries.tsv"
+
+        filtered_tsv = os.path.join(output_dir, filtered_filename)
+        save_queries_tsv(filtered, filtered_tsv)
+        filtered_paths[strategy] = filtered_tsv
+
+        # ── Statistics ──
+        total = len(paraphrased)
+        kept = len(filtered)
+        removed = total - kept
+
+        print(f"\n   {'─' * 60}")
+        print(f"   📊 Strategy: {strategy}")
+        print(f"      Similarity threshold  : ≥ {threshold:.2f}")
+        print(f"      Total original queries: {total:,}")
+        print(f"      Queries kept           : {kept:,} ({100 * kept / total:.1f}%)")
+        print(f"      Queries filtered out   : {removed:,} ({100 * removed / total:.1f}%)")
+
+        if kept_sims:
+            kept_arr = np.array(kept_sims)
+            print(f"      Kept sim range         : [{kept_arr.min():.4f}, {kept_arr.max():.4f}]")
+            print(f"      Kept sim mean          : {kept_arr.mean():.4f}")
+
+        if excluded_sims:
+            exc_arr = np.array(excluded_sims)
+            print(f"      Excluded sim range     : [{exc_arr.min():.4f}, {exc_arr.max():.4f}]")
+            print(f"      Excluded sim mean      : {exc_arr.mean():.4f}")
+
+        print(f"      Saved filtered TSV     : {filtered_tsv}")
+
+    return filtered_paths
+
+
+def register_filtered_datasets(
+    eval_id: str,
+    filtered_paths: Dict[str, str],
+    paraphrase_dir: str,
+    subset_name: Optional[str] = None,
+    threshold: Optional[float] = None,
+) -> List[str]:
+    """
+    Register filtered paraphrased datasets with ir_datasets and persist
+    the mapping in registry_map.json for cross-process discovery.
+
+    Dataset IDs:
+      - With subset_name (single strategy):  {eval_id}/paraphrased/{subset_name}
+      - With subset_name (multi strategy):   {eval_id}/paraphrased/{subset_name}_{strategy}
+      - Without subset_name:                 {eval_id}/paraphrased/{strategy}_filtered_t{threshold}
+    """
+    from ir_datasets.datasets.base import Dataset
+
+    original_ds = ir_datasets.load(eval_id)
+    registered = []
+    registry_entries = {}
+
+    for strategy_name, tsv_path in filtered_paths.items():
+        if not os.path.exists(tsv_path):
+            continue
+
+        # Build dataset ID
+        if subset_name:
+            if len(filtered_paths) > 1:
+                dataset_id = f"{eval_id}/paraphrased/{subset_name}_{strategy_name}"
+            else:
+                dataset_id = f"{eval_id}/paraphrased/{subset_name}"
+        else:
+            thresh_tag = f"{threshold:.2f}".replace(".", "") if threshold else ""
+            dataset_id = f"{eval_id}/paraphrased/{strategy_name}_filtered_t{thresh_tag}"
+
+        queries_constituent = _InMemoryQueriesHandler(tsv_path)
+        dataset = Dataset(queries_constituent, original_ds)
+        ir_datasets.registry.register(dataset_id, dataset)
+        registered.append(dataset_id)
+
+        # Track for registry_map.json (store relative filename)
+        registry_entries[dataset_id] = os.path.basename(tsv_path)
+
+    # Persist to registry_map.json for cross-process access
+    registry_map_path = os.path.join(paraphrase_dir, "registry_map.json")
+    if os.path.exists(registry_map_path):
+        with open(registry_map_path, "r", encoding="utf-8") as f:
+            existing_map = json.load(f)
+    else:
+        existing_map = {}
+    existing_map.update(registry_entries)
+    with open(registry_map_path, "w", encoding="utf-8") as f:
+        json.dump(existing_map, f, indent=2, ensure_ascii=False)
+
+    if registered:
+        print(f"\n   Registered {len(registered)} filtered dataset(s):")
+        for ds_id in registered:
+            print(f"     - {ds_id}")
+        print(f"   Registry map saved → {registry_map_path}")
+
+    return registered
 
 
 # =============================================================================
@@ -975,6 +1176,22 @@ def parse_args():
         default=5,
         help="Number of sample queries to display per threshold in EDA (default: 5)",
     )
+    parser.add_argument(
+        "--sim_threshold",
+        type=float,
+        default=None,
+        help="Similarity threshold for filtering paraphrased queries. "
+             "Queries with similarity below this threshold are excluded. "
+             "Requires Phase 2 similarity computation. (default: None = no filtering)",
+    )
+    parser.add_argument(
+        "--subset_name",
+        type=str,
+        default=None,
+        help="Custom subset name for registering filtered datasets with ir_datasets. "
+             "Dataset ID becomes: {eval_id}/paraphrased/{subset_name}. "
+             "(default: auto-generated from strategy and threshold)",
+    )
     return parser.parse_args()
 
 
@@ -1007,6 +1224,8 @@ def main():
     print(f"   Pivot lang:     {args.pivot_lang}")
     print(f"   Embedding:      {args.embedding_model}")
     print(f"   Sim-only mode:  {args.similarity_only}")
+    print(f"   Sim threshold:  {args.sim_threshold}")
+    print(f"   Subset name:    {args.subset_name}")
 
     # ── Load original queries ──
     print("\n" + "=" * 70)
@@ -1056,7 +1275,38 @@ def main():
         n_samples=args.n_samples,
     )
 
-    # ── Register with ir_datasets ──
+    # ══════════════════════════════════════════════════════════════════════
+    # Phase 4: Filter by similarity threshold (optional)
+    # ══════════════════════════════════════════════════════════════════════
+    if args.sim_threshold is not None:
+        filtered_paths = filter_queries_by_threshold(
+            strategies=strategies,
+            original_queries=queries,
+            all_similarities=all_similarities,
+            output_dir=output_dir,
+            threshold=args.sim_threshold,
+            subset_name=args.subset_name,
+            embedding_model_name=args.embedding_model,
+        )
+
+        if filtered_paths:
+            filtered_registered = register_filtered_datasets(
+                eval_id=args.eval_id,
+                filtered_paths=filtered_paths,
+                paraphrase_dir=output_dir,
+                subset_name=args.subset_name,
+                threshold=args.sim_threshold,
+            )
+            if filtered_registered:
+                print("\n" + "=" * 70)
+                print("✅ FILTERED DATASET VERIFICATION")
+                print("=" * 70)
+                for ds_id in filtered_registered:
+                    ds = ir_datasets.load(ds_id)
+                    count = ds.queries_count()
+                    print(f"   ✅ ir_datasets.load('{ds_id}') → {count:,} queries")
+
+    # ── Register with ir_datasets (all unfiltered) ──
     print("\n" + "=" * 70)
     print("📦 Registering paraphrased datasets with ir_datasets")
     print("=" * 70)
