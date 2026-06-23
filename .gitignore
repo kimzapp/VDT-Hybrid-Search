@@ -12,3 +12,7 @@ qwen3_4b_embedding_faiss
 msmarco_regex_wordlevel_tokenizer
 paraphrased_queries
 co_condenser_marco_embedding_faiss
+dense_index_vi
+bm25_index_vi
+cache
+metadata_sqlite

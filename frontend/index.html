@@ -117,6 +117,26 @@
                             <input type="range" id="fusion-alpha-slider" min="0.0" max="1.0" value="0.5" step="0.05">
                             <span class="setting-desc">Alpha = Sparse weight; (1 - Alpha) = Dense weight</span>
                         </div>
+
+                        <!-- Date Range Filter -->
+                        <div class="setting-item setting-item-full">
+                            <label><i class="fa-regular fa-calendar"></i> Filter by Date Range</label>
+                            <div class="date-filter-row">
+                                <div class="date-input-group">
+                                    <label for="date-from">From</label>
+                                    <input type="date" id="date-from" class="date-input">
+                                </div>
+                                <span class="date-separator">—</span>
+                                <div class="date-input-group">
+                                    <label for="date-to">To</label>
+                                    <input type="date" id="date-to" class="date-input">
+                                </div>
+                                <button type="button" class="btn-clear-date" id="clear-dates" title="Clear date filters">
+                                    <i class="fa-solid fa-xmark"></i>
+                                </button>
+                            </div>
+                            <span class="setting-desc">Filter retrieved passages by their written date (optional)</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -174,7 +194,42 @@
                     <p>Enter a query above to start searching over <strong>8.8 Million passages</strong> of the MSMARCO dataset. Try selecting different retrieval modes and advanced settings to observe how retrieval paths impact scores and latencies.</p>
                 </div>
             </div>
+
+            <!-- Pagination Controls -->
+            <div class="pagination-controls" id="pagination-controls" style="display: none;">
+                <button class="page-btn" id="page-prev" title="Previous page">
+                    <i class="fa-solid fa-chevron-left"></i>
+                </button>
+                <span class="page-info" id="page-info">Page 1 / 1</span>
+                <button class="page-btn" id="page-next" title="Next page">
+                    <i class="fa-solid fa-chevron-right"></i>
+                </button>
+            </div>
         </section>
+
+        <!-- Author Passages Modal -->
+        <div class="modal-overlay" id="author-modal" style="display: none;">
+            <div class="modal-container glass-panel">
+                <div class="modal-header">
+                    <h2 id="modal-author-title"><i class="fa-solid fa-user-pen"></i> Author Passages</h2>
+                    <button class="modal-close-btn" id="modal-close" title="Close">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <div class="modal-body" id="modal-body">
+                    <!-- Populated by JS -->
+                </div>
+                <div class="modal-pagination" id="modal-pagination" style="display: none;">
+                    <button class="page-btn" id="modal-page-prev" title="Previous page">
+                        <i class="fa-solid fa-chevron-left"></i>
+                    </button>
+                    <span class="page-info" id="modal-page-info">Page 1 / 1</span>
+                    <button class="page-btn" id="modal-page-next" title="Next page">
+                        <i class="fa-solid fa-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
 
         <!-- Footer -->
         <footer class="app-footer">

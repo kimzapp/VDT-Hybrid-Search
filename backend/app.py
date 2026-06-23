@@ -3,11 +3,12 @@
 # ==============================================================================
 
 import os
+import sqlite3
 import sys
 import time
 import traceback
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -42,13 +43,14 @@ app.add_middleware(
 bm25_retriever = None
 dense_retriever = None
 docs_store = None
+metadata_db_path = None
 dense_loaded = False
 dense_load_error = None
 
 # Lifespan/Startup Initialization
 @app.on_event("startup")
 def startup_event():
-    global bm25_retriever, dense_retriever, docs_store, dense_loaded, dense_load_error
+    global bm25_retriever, dense_retriever, docs_store, metadata_db_path, dense_loaded, dense_load_error
 
     # 1. Load Sparse Retriever (BM25S)
     print("Loading sparse index (BM25S)...")
@@ -110,6 +112,13 @@ def startup_event():
         print(f"Error loading docs store: {e}. Passages text will not be displayed.")
         traceback.print_exc()
 
+    # 4. Load metadata SQLite database path
+    if os.path.exists(config.METADATA_DB):
+        metadata_db_path = config.METADATA_DB
+        print(f"Metadata SQLite database found: {metadata_db_path}")
+    else:
+        print(f"Warning: Metadata database {config.METADATA_DB} not found. Metadata will not be displayed.")
+
 
 # Request/Response schemas
 class SearchRequest(BaseModel):
@@ -119,12 +128,16 @@ class SearchRequest(BaseModel):
     fusion_strategy: str = Field(default="rrf", description="rrf | weighted_sum | combsum | combmnz | borda")
     rrf_k: int = Field(default=60, ge=1)
     fusion_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    date_from: Optional[str] = Field(default=None, description="Filter: min written_date (YYYY-MM-DD)")
+    date_to: Optional[str] = Field(default=None, description="Filter: max written_date (YYYY-MM-DD)")
 
 class SearchResultItem(BaseModel):
     rank: int
     doc_id: str
     score: float
     text: str
+    author_name: Optional[str] = None
+    written_date: Optional[str] = None
 
 class LatencyStats(BaseModel):
     total_ms: float
@@ -140,6 +153,21 @@ class SearchResponse(BaseModel):
     latency: LatencyStats
     fusion_strategy: Optional[str] = None
     num_results: int
+    total_before_filter: int = 0
+
+class AuthorPassageItem(BaseModel):
+    doc_id: str
+    text: str
+    author_name: str
+    written_date: Optional[str] = None
+
+class AuthorPassagesResponse(BaseModel):
+    author_name: str
+    passages: List[AuthorPassageItem]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
 
 
 # Endpoints
@@ -164,6 +192,42 @@ def get_backend_config():
         "dense_load_error": dense_load_error,
         "available_fusion_strategies": list_strategies(),
     }
+
+def _batch_lookup_metadata(doc_ids: list) -> dict:
+    """
+    Batch-lookup author_name and written_date from the SQLite metadata DB.
+    Returns: {doc_id: {"author_name": str, "written_date": str}, ...}
+    """
+    if not metadata_db_path or not doc_ids:
+        return {}
+
+    result = {}
+    try:
+        conn = sqlite3.connect(metadata_db_path, timeout=5)
+        conn.execute("PRAGMA query_only=ON;")
+        cursor = conn.cursor()
+
+        # Use batched IN clause queries (SQLite variable limit is ~999)
+        batch_size = 900
+        for i in range(0, len(doc_ids), batch_size):
+            batch = doc_ids[i:i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            cursor.execute(
+                f"SELECT doc_id, author_name, written_date FROM passage_metadata_full WHERE doc_id IN ({placeholders})",
+                batch,
+            )
+            for row in cursor.fetchall():
+                result[row[0]] = {
+                    "author_name": row[1],
+                    "written_date": row[2],
+                }
+
+        conn.close()
+    except Exception as e:
+        print(f"Warning: metadata lookup failed: {e}")
+
+    return result
+
 
 @app.post("/api/search", response_model=SearchResponse)
 def search(req: SearchRequest):
@@ -277,6 +341,23 @@ def search(req: SearchRequest):
     results_list = []
     # Sort doc_ids by score descending
     sorted_docs = sorted(final_results.items(), key=lambda item: item[1], reverse=True)
+    total_before_filter = len(sorted_docs)
+
+    # Batch-fetch metadata from SQLite
+    metadata_map = _batch_lookup_metadata([doc_id for doc_id, _ in sorted_docs])
+
+    # Apply date filter if provided
+    if req.date_from or req.date_to:
+        filtered_docs = []
+        for doc_id, score in sorted_docs:
+            meta = metadata_map.get(doc_id, {})
+            wd = meta.get("written_date", "")
+            if req.date_from and wd < req.date_from:
+                continue
+            if req.date_to and wd > req.date_to:
+                continue
+            filtered_docs.append((doc_id, score))
+        sorted_docs = filtered_docs
 
     for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
         # Fetch text from docs store
@@ -290,13 +371,18 @@ def search(req: SearchRequest):
                     text = f"Document {doc_id} not found in {config.CORPUS_ID} dataset."
             except Exception as lookup_err:
                 text = f"Error retrieving text: {str(lookup_err)}"
-        
+
+        # Get metadata if available
+        meta = metadata_map.get(doc_id, {})
+
         results_list.append(
             SearchResultItem(
                 rank=rank,
                 doc_id=doc_id,
                 score=float(score),
                 text=text,
+                author_name=meta.get("author_name"),
+                written_date=meta.get("written_date"),
             )
         )
 
@@ -315,7 +401,86 @@ def search(req: SearchRequest):
         ),
         fusion_strategy=req.fusion_strategy if mode == "hybrid" else None,
         num_results=len(results_list),
+        total_before_filter=total_before_filter,
     )
+
+
+@app.get("/api/author/passages")
+def get_author_passages(
+    author_name: str = Query(..., description="Author name to look up"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+):
+    """Return paginated passages for a given author."""
+    if not metadata_db_path:
+        raise HTTPException(status_code=503, detail="Metadata database is not loaded.")
+
+    try:
+        conn = sqlite3.connect(metadata_db_path, timeout=5)
+        conn.execute("PRAGMA query_only=ON;")
+        cursor = conn.cursor()
+
+        # Get total count
+        cursor.execute(
+            "SELECT COUNT(*) FROM passage_metadata_full WHERE author_name = ?",
+            (author_name,),
+        )
+        total = cursor.fetchone()[0]
+
+        if total == 0:
+            conn.close()
+            return AuthorPassagesResponse(
+                author_name=author_name,
+                passages=[],
+                page=page,
+                page_size=page_size,
+                total=0,
+                total_pages=0,
+            )
+
+        total_pages = (total + page_size - 1) // page_size
+        offset = (page - 1) * page_size
+
+        cursor.execute(
+            "SELECT doc_id, author_name, written_date FROM passage_metadata_full "
+            "WHERE author_name = ? ORDER BY written_date DESC LIMIT ? OFFSET ?",
+            (author_name, page_size, offset),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        passages = []
+        for row in rows:
+            doc_id, a_name, written_date = row
+            text = "Passage text database not loaded."
+            if docs_store is not None:
+                try:
+                    doc_obj = docs_store.get(str(doc_id))
+                    if doc_obj is not None:
+                        text = doc_obj.text
+                    else:
+                        text = f"Document {doc_id} not found."
+                except Exception:
+                    text = f"Error retrieving text for {doc_id}."
+
+            passages.append(AuthorPassageItem(
+                doc_id=str(doc_id),
+                text=text,
+                author_name=a_name,
+                written_date=written_date,
+            ))
+
+        return AuthorPassagesResponse(
+            author_name=author_name,
+            passages=passages,
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages,
+        )
+
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 # Serve frontend static files
