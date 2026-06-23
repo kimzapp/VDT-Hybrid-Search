@@ -12,7 +12,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 import Stemmer
 from embedding_models import create_embedding_model
-
+from reranker_models import create_reranker_model
 
 def custom_tokenize(texts, **tokenize_kwargs):
     """
@@ -799,3 +799,75 @@ class DenseFaissRetriever:
             "p50_encode_ms_per_query": float(np.percentile(encode_per_query, 50) * 1000),
             "p50_faiss_search_ms_per_query": float(np.percentile(search_per_query, 50) * 1000),
         }
+
+class CrossEncoderReranker:
+    """
+    Reranker using CrossEncoder models from sentence_transformers.
+    """
+    def __init__(self, model_name="bge_reranker_base", device="cuda"):
+        self.model_name = model_name
+        self.device = device
+        self.model, self.config = create_reranker_model(model_name, device=device)
+
+    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None):
+        """
+        Reranks a list of run dictionaries.
+        
+        Args:
+            queries: list of query strings
+            run_dict_list: list of dictionaries, where each dictionary maps doc_id to score
+            corpus: dict mapping doc_id to document text
+            top_k: number of top documents to rerank for each query
+            batch_size: batch size for CrossEncoder inference
+        
+        Returns:
+            list of reranked run dictionaries
+        """
+        if batch_size is None:
+            batch_size = self.config.default_batch_size
+            
+        reranked_run_dict_list = []
+        
+        for query, run_dict in tqdm(zip(queries, run_dict_list), total=len(queries), desc="Reranking"):
+            # Sort the current run_dict by score descending and take top_k
+            sorted_docs = sorted(run_dict.items(), key=lambda x: x[1], reverse=True)
+            top_docs_to_rerank = sorted_docs[:top_k]
+            remaining_docs = sorted_docs[top_k:]
+            
+            # Form sentence pairs for the top_k docs
+            sentence_pairs = []
+            doc_ids_to_rerank = []
+            for doc_id, _ in top_docs_to_rerank:
+                if doc_id in corpus:
+                    doc_text = corpus[doc_id]
+                    sentence_pairs.append([query, doc_text])
+                    doc_ids_to_rerank.append(doc_id)
+                else:
+                    # In case the document is not found in corpus (should not happen)
+                    print(f"Warning: doc_id {doc_id} not found in corpus.")
+            
+            if not sentence_pairs:
+                reranked_run_dict_list.append(run_dict)
+                continue
+                
+            # Compute cross-encoder scores
+            scores = self.model.predict(sentence_pairs, batch_size=batch_size, show_progress_bar=False)
+            
+            # Re-build the run dict
+            new_run_dict = {}
+            # Add reranked docs
+            for doc_id, score in zip(doc_ids_to_rerank, scores):
+                new_run_dict[doc_id] = float(score)
+                
+            # Append remaining documents with lower scores so they don't affect top_k reranked results
+            # but are still available for deep metrics like recall@1000
+            if remaining_docs:
+                min_rerank_score = min(scores) if len(scores) > 0 else 0.0
+                max_remaining_score = max(score for _, score in remaining_docs) if remaining_docs else 0.0
+                shift = min_rerank_score - max_remaining_score - 1.0 # Ensure strictly lower
+                for doc_id, original_score in remaining_docs:
+                    new_run_dict[doc_id] = float(original_score + shift)
+            
+            reranked_run_dict_list.append(new_run_dict)
+            
+        return reranked_run_dict_list

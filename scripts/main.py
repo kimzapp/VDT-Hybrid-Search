@@ -20,7 +20,7 @@ if "--target_devices" in sys.argv:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
         print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} before loading libraries.")
 
-from retriever import BM25SRetriever, DenseFaissRetriever
+from retriever import BM25SRetriever, DenseFaissRetriever, CrossEncoderReranker
 from data_loading import download_and_preview_msmarco
 from fusion import get_fusion_fn, list_strategies
 from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report
@@ -176,6 +176,12 @@ def parse_args():
     # Setting limits
     parser.add_argument("--max_queries", type=int, default=None, help="Max queries to evaluate (None for all)")
     parser.add_argument("--top_k", type=int, default=10, help="Top K documents to retrieve")
+    
+    # Reranking
+    parser.add_argument("--rerank", action="store_true", help="Enable CrossEncoder reranking at the end of the pipeline")
+    parser.add_argument("--reranker_model", type=str, default="BAAI/bge-reranker-base", help="Reranker model name or registry key")
+    parser.add_argument("--rerank_top_k", type=int, default=100, help="Number of top documents to rerank per query")
+    parser.add_argument("--rerank_batch_size", type=int, default=64, help="Batch size for the CrossEncoder reranker")
     
     # Batch sizes and model settings
     parser.add_argument("--batch_size", type=int, default=128, help="Default encode batch size used by SentenceTransformer")
@@ -555,7 +561,8 @@ def main():
         print("   ⏭️  Sparse retriever skipped (mode=dense)")
 
     print_header("PREPARING TARGET QUERIES")
-    eval_query_ids, eval_query_texts = prepare_eval_queries(queries=queries, qrels=qrels, max_queries=args.max_queries)
+    eval_query_ids, raw_eval_query_texts = prepare_eval_queries(queries=queries, qrels=qrels, max_queries=args.max_queries)
+    eval_query_texts = raw_eval_query_texts
 
     # Apply Vietnamese preprocessing to queries if needed
     if vi_mode:
@@ -598,6 +605,28 @@ def main():
         fusion_strategy=args.fusion_strategy,
         fusion_kwargs=fusion_kwargs,
     )
+
+    if args.rerank:
+        print_header("RERANKING")
+        reranker = CrossEncoderReranker(model_name=args.reranker_model, device=args.device)
+        reranked_run_results = {}
+        for run_name, run_dict_list in run_results.items():
+            print(f"   Reranking {run_name} (top_k={args.rerank_top_k})...")
+            start = time.perf_counter()
+            # Reranker uses raw texts, since its tokenizer handles raw text better than word-segmented text.
+            new_run_dict_list = reranker.rerank(
+                queries=raw_eval_query_texts,
+                run_dict_list=run_dict_list,
+                corpus=corpus,
+                top_k=args.rerank_top_k,
+                batch_size=args.rerank_batch_size
+            )
+            rerank_time = time.perf_counter() - start
+            print_stat(f"   {run_name} Rerank time", f"{rerank_time:.2f}s")
+            reranked_run_results[f"{run_name} + Rerank"] = new_run_dict_list
+            retrieval_stats[f"{run_name}_rerank_only"] = _latency_stats(rerank_time, len(raw_eval_query_texts))
+            
+        run_results.update(reranked_run_results)
 
     print_header("EVALUATION METRICS (RANX)")
     qrels_obj, runs = build_ranx_objects(eval_query_ids, qrels, run_results)
