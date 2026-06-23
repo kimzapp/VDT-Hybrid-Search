@@ -181,6 +181,7 @@ def parse_args():
     parser.add_argument("--rerank", action="store_true", help="Enable CrossEncoder reranking at the end of the pipeline")
     parser.add_argument("--reranker_model", type=str, default="BAAI/bge-reranker-base", help="Reranker model name or registry key")
     parser.add_argument("--rerank_top_k", type=int, default=100, help="Number of top documents to rerank per query")
+    parser.add_argument("--final_top_k", type=int, default=None, help="Number of top documents to retain after reranking")
     parser.add_argument("--rerank_batch_size", type=int, default=64, help="Batch size for the CrossEncoder reranker")
     
     # Batch sizes and model settings
@@ -619,7 +620,8 @@ def main():
                 run_dict_list=run_dict_list,
                 corpus=corpus,
                 top_k=args.rerank_top_k,
-                batch_size=args.rerank_batch_size
+                batch_size=args.rerank_batch_size,
+                final_top_k=args.final_top_k
             )
             rerank_time = time.perf_counter() - start
             print_stat(f"   {run_name} Rerank time", f"{rerank_time:.2f}s")

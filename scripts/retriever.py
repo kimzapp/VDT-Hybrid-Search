@@ -809,7 +809,7 @@ class CrossEncoderReranker:
         self.device = device
         self.model, self.config = create_reranker_model(model_name, device=device)
 
-    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None):
+    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None, final_top_k=None):
         """
         Reranks a list of run dictionaries.
         
@@ -819,6 +819,7 @@ class CrossEncoderReranker:
             corpus: dict mapping doc_id to document text
             top_k: number of top documents to rerank for each query
             batch_size: batch size for CrossEncoder inference
+            final_top_k: number of top documents to retain after reranking
         
         Returns:
             list of reranked run dictionaries
@@ -867,6 +868,10 @@ class CrossEncoderReranker:
                 shift = min_rerank_score - max_remaining_score - 1.0 # Ensure strictly lower
                 for doc_id, original_score in remaining_docs:
                     new_run_dict[doc_id] = float(original_score + shift)
+                    
+            if final_top_k is not None:
+                sorted_new_docs = sorted(new_run_dict.items(), key=lambda x: x[1], reverse=True)[:final_top_k]
+                new_run_dict = {doc_id: score for doc_id, score in sorted_new_docs}
             
             reranked_run_dict_list.append(new_run_dict)
             

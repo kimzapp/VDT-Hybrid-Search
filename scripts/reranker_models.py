@@ -23,6 +23,10 @@ RERANKER_MODEL_REGISTRY: Dict[str, RerankerModelConfig] = {
         model_id="BAAI/bge-reranker-v2-m3",
         note="BGE Reranker V2 M3 (Multilingual)."
     ),
+    "vi_ranker": RerankerModelConfig(
+        model_id="namdp-ptit/ViRanker",
+        note="Vietnamese Reranker (ViRanker)."
+    ),
 }
 
 def create_reranker_model(
