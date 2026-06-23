@@ -231,11 +231,13 @@ class DenseFaissRetriever:
         faiss_num_threads=None,
         use_gpu=False,
         load_model=True,
+        query_prefix=None,
     ):
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
         self.normalize_embeddings = normalize_embeddings
+        self.query_prefix = query_prefix
 
         # Search/index options
         self.index_type = index_type.lower()
@@ -487,6 +489,7 @@ class DenseFaissRetriever:
         use_gpu=False,
         faiss_num_threads=None,
         load_model=True,
+        query_prefix=None,
     ):
         config_path = os.path.join(index_dir, config_filename)
         # Also try index_config.json (format used by dense_indexing.py)
@@ -536,6 +539,7 @@ class DenseFaissRetriever:
             faiss_num_threads=faiss_num_threads if faiss_num_threads is not None else config.get("faiss_num_threads"),
             use_gpu=use_gpu,
             load_model=load_model,
+            query_prefix=query_prefix,
         )
 
         obj.index = faiss.read_index(faiss_index_path)
@@ -578,7 +582,10 @@ class DenseFaissRetriever:
 
         # Apply query prefix if configured
         texts_to_encode = queries
-        if self.emb_config and self.emb_config.query_prefix:
+        if self.query_prefix is not None:
+            if self.query_prefix:
+                texts_to_encode = [self.query_prefix + q for q in queries]
+        elif self.emb_config and self.emb_config.query_prefix:
             texts_to_encode = [self.emb_config.query_prefix + q for q in queries]
 
         encode_kwargs = {}

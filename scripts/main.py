@@ -185,6 +185,8 @@ def parse_args():
     parser.add_argument("--dense_search_batch_size", type=int, default=None, help="Optional inner FAISS search batch size for dense retrieval")
     parser.add_argument("--no_bm25_mmap", action="store_false", dest="bm25_mmap", help="Disable mmap for BM25")
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-small-en-v1.5", help="Embedding model name")
+    parser.add_argument("--query_prefix", type=str, default=None, help="Custom query instruction prefix to add before queries. Overrides the model's default prefix.")
+    parser.add_argument("--disable_query_prefix", action="store_true", help="Disable query prefix/instruction even if the model config has one")
     parser.add_argument("--no_normalize_emb", action="store_false", dest="normalize_emb", help="Disable embedding normalization")
     parser.add_argument("--device", type=str, default="cuda", help="Device for SentenceTransformer query encoding (cuda or cpu)")
     parser.add_argument("--target_devices", nargs="+", default=None, help="List of GPU IDs to use (e.g. 0 1 or cuda:0). Sets CUDA_VISIBLE_DEVICES early.")
@@ -527,6 +529,7 @@ def main():
 
     if mode in ("dense", "hybrid"):
         print(f"   Loading dense retriever (FAISS)...")
+        query_prefix = "" if args.disable_query_prefix else args.query_prefix
         dense_retriever = DenseFaissRetriever.load(
             index_dir=args.dense_index_dir,
             model_name=args.embedding_model,
@@ -535,6 +538,7 @@ def main():
             normalize_embeddings=args.normalize_emb,
             use_gpu=args.dense_use_gpu,
             faiss_num_threads=args.faiss_num_threads,
+            query_prefix=query_prefix,
         )
 
         if args.hnsw_ef_search is not None and hasattr(dense_retriever, "set_hnsw_ef_search"):
