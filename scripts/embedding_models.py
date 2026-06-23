@@ -149,28 +149,74 @@ MODEL_REGISTRY: Dict[str, EmbeddingModelConfig] = {
     ),
 
     "co-condenser-marco": EmbeddingModelConfig(
-        model_id="Luyu/co-condenser-marco",
+        model_id="/home/rmits/.cache/modelscope/hub/models/iic/nlp_corom_sentence-embedding_english-base",
         normalize=True,
-        pool_type='cls'
+    ),
+
+    "embedding_vi": EmbeddingModelConfig(
+        model_id="bkai-foundation-models/vietnamese-bi-encoder",
+        trust_remote_code=True,
+        normalize=True,
     )
 }
 
-def create_embedding_model(model_id: str, pool_type: str, normalize: bool, trust_remote_code: bool=True, model_kwargs: dict = {}     ):
+def create_embedding_model(
+    model_id: str,
+    pool_type: str = None,
+    normalize: bool = True,
+    trust_remote_code: bool = False,
+    device: str = "cuda",
+    model_kwargs: dict = None,
+):
+    """Create an embedding model from registry key or HuggingFace model ID.
+
+    Returns:
+        (model, config): SentenceTransformer model and its EmbeddingModelConfig.
+        If model_id is not in the registry, config will have default values.
+    """
+    model_kwargs = model_kwargs or {}
+
+    # --- Resolve config ---
+    if model_id in MODEL_REGISTRY:
+        config = MODEL_REGISTRY[model_id]
+        model_name = config.model_id
+        normalize = config.normalize
+        trust_remote_code = config.trust_remote_code
+        pool_type = pool_type or config.pool_type
+    else:
+        # Treat model_id as a raw HuggingFace model name / local path
+        model_name = model_id
+        config = EmbeddingModelConfig(
+            model_id=model_id,
+            normalize=normalize,
+            trust_remote_code=trust_remote_code,
+            pool_type=pool_type,
+        )
+
+    # --- Build SentenceTransformer ---
     if pool_type is None:
         model = SentenceTransformer(
-            model_id,
-            device="cuda",
+            model_name,
+            device=device,
             trust_remote_code=trust_remote_code,
             model_kwargs=model_kwargs,
         )
     else:
-        word_embedding_model = models.Transformer(model_id, trust_remote_code=trust_remote_code, model_kwargs=model_kwargs)
+        word_embedding_model = models.Transformer(
+            model_name,
+            model_kwargs=model_kwargs,
+        )
         pooling_model = models.Pooling(
-            word_embedding_model.get_embedding_dimension(),
+            word_embedding_model.get_word_embedding_dimension(),
             pooling_mode=pool_type,
         )
         model = SentenceTransformer(
             modules=[word_embedding_model, pooling_model],
-            device='cuda'
+            device=device,
         )
-    return model    
+
+    # --- Apply max_seq_length from config ---
+    if config.max_seq_length is not None:
+        model.max_seq_length = config.max_seq_length
+
+    return model, config

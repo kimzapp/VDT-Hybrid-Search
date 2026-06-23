@@ -136,6 +136,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--doc_prefix", type=str, default=None)
     parser.add_argument("--query_prefix", type=str, default=None)
 
+    # Pre-segmented corpus (e.g., Vietnamese word-segmented text)
+    parser.add_argument(
+        "--segmented_corpus_path",
+        type=str,
+        default=None,
+        help="Path to pre-segmented corpus JSONL (e.g. for Vietnamese). "
+             "Each line must have 'doc_id' and 'text' fields. "
+             "If provided, reads from this file instead of ir_datasets.",
+    )
+
     # Debug flags
     parser.add_argument("--quick_run", action="store_true", help="Run on a small subset.")
     parser.add_argument("--max_samples", type=int, default=1000, help="Max docs for quick_run.")
@@ -229,6 +239,53 @@ def iter_doc_chunks(
         yield doc_ids, texts
 
 
+def count_segmented_corpus(path: str, max_samples: Optional[int]) -> int:
+    """Count documents in a pre-segmented JSONL file."""
+    count = 0
+    with open(path, "rb") as f:
+        for _ in f:
+            count += 1
+            if max_samples is not None and count >= max_samples:
+                break
+    return count
+
+
+def iter_segmented_corpus_chunks(
+    path: str,
+    chunk_size: int,
+    max_samples: Optional[int],
+    doc_prefix: str,
+) -> Iterator[Tuple[List[str], List[str]]]:
+    """Stream documents from a pre-segmented JSONL file in chunks.
+
+    Each line must be a JSON object with 'doc_id' and 'text' fields.
+    This is used for corpora that require preprocessing (e.g., Vietnamese
+    word segmentation) before embedding.
+    """
+    import orjson
+
+    doc_ids: List[str] = []
+    texts: List[str] = []
+    count = 0
+
+    with open(path, "rb") as f:
+        for line in f:
+            obj = orjson.loads(line)
+            doc_ids.append(str(obj["doc_id"]))
+            texts.append(doc_prefix + str(obj["text"]))
+            count += 1
+
+            if max_samples is not None and count >= max_samples:
+                break
+
+            if len(doc_ids) >= chunk_size:
+                yield doc_ids, texts
+                doc_ids, texts = [], []
+
+    if doc_ids:
+        yield doc_ids, texts
+
+
 def build_sentence_transformer(
     cfg: EmbeddingModelConfig,
     args: argparse.Namespace,
@@ -243,7 +300,7 @@ def build_sentence_transformer(
     if args.attn_implementation is not None:
         model_kwargs["attn_implementation"] = args.attn_implementation
 
-    model = create_embedding_model(cfg.model_id, cfg.pool_type, cfg.normalize, trust_remote_code=cfg.trust_remote_code, model_kwargs=model_kwargs)
+    model, _ = create_embedding_model(cfg.model_id, cfg.pool_type, cfg.normalize, trust_remote_code=cfg.trust_remote_code, model_kwargs=model_kwargs)
 
     max_seq_length = args.max_seq_length or cfg.max_seq_length
     if max_seq_length is not None:
@@ -369,8 +426,14 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    dataset = ir_datasets.load(args.corpus_id)
-    num_docs = maybe_get_docs_count(dataset, max_samples=max_samples)
+    use_segmented = args.segmented_corpus_path is not None
+    if use_segmented:
+        print(f"Using pre-segmented corpus: {args.segmented_corpus_path}")
+        num_docs = count_segmented_corpus(args.segmented_corpus_path, max_samples=max_samples)
+        dataset = None  # Not needed when using segmented corpus
+    else:
+        dataset = ir_datasets.load(args.corpus_id)
+        num_docs = maybe_get_docs_count(dataset, max_samples=max_samples)
     print(f"Total passages to index: {num_docs:,}")
 
     # Build a controller model to resolve embedding dim and start multi-process pool.
@@ -417,12 +480,22 @@ def main() -> None:
         with open(metadata_path, "w", encoding="utf-8") as meta_f:
             pbar = tqdm(total=num_docs, desc="Encoding corpus", unit="doc")
 
-            for chunk_ids, chunk_texts in iter_doc_chunks(
-                dataset=dataset,
-                chunk_size=args.chunk_size,
-                max_samples=max_samples,
-                doc_prefix=cfg.doc_prefix,
-            ):
+            if use_segmented:
+                chunk_iterator = iter_segmented_corpus_chunks(
+                    path=args.segmented_corpus_path,
+                    chunk_size=args.chunk_size,
+                    max_samples=max_samples,
+                    doc_prefix=cfg.doc_prefix,
+                )
+            else:
+                chunk_iterator = iter_doc_chunks(
+                    dataset=dataset,
+                    chunk_size=args.chunk_size,
+                    max_samples=max_samples,
+                    doc_prefix=cfg.doc_prefix,
+                )
+
+            for chunk_ids, chunk_texts in chunk_iterator:
                 if use_multi_process:
                     chunk_embeddings = encode_texts_multi_process(
                         model=model,

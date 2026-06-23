@@ -11,32 +11,49 @@ import time
 import faiss
 from sentence_transformers import SentenceTransformer
 import Stemmer
+from embedding_models import create_embedding_model
 
 
 def custom_tokenize(texts, **tokenize_kwargs):
     """
     Tokenize texts using bm25s.tokenize, supporting custom 'splitter' callback
     in tokenize_kwargs.
+
+    When a custom 'splitter' is provided, we use bm25s.Tokenizer with the
+    splitter as a callable so that the full pipeline (lower, split, stopwords,
+    stemming, vocab) is handled correctly.  Passing pre-split lists directly
+    to bm25s.tokenize() would fail because it tries to call .lower() on each
+    element.
     """
     if "splitter" in tokenize_kwargs:
         splitter = tokenize_kwargs["splitter"]
         kwargs = tokenize_kwargs.copy()
         kwargs.pop("splitter")
-        
+
+        # Map bm25s.tokenize-style kwargs to bm25s.Tokenizer-style kwargs
+        stemmer = kwargs.pop("stemmer", None)
+        stopwords = kwargs.pop("stopwords", None)
+        lower = kwargs.pop("lower", True)
+        show_progress = kwargs.pop("show_progress", False)
+        return_ids = kwargs.pop("return_ids", True)
+
         if isinstance(texts, str):
-            tokenized = [splitter(texts)]
-        else:
-            if not isinstance(texts, list):
-                texts = list(texts)
-            if len(texts) > 0:
-                first_element = texts[0]
-                if not isinstance(first_element, str) and hasattr(first_element, "__iter__"):
-                    tokenized = texts
-                else:
-                    tokenized = [splitter(t) for t in texts]
-            else:
-                tokenized = []
-        return bm25s.tokenize(tokenized, **kwargs)
+            texts = [texts]
+        elif not isinstance(texts, list):
+            texts = list(texts)
+
+        tokenizer = bm25s.tokenization.Tokenizer(
+            lower=lower,
+            splitter=splitter,
+            stopwords=stopwords,
+            stemmer=stemmer,
+        )
+        return_as = "tuple" if return_ids else "string"
+        return tokenizer.tokenize(
+            texts,
+            return_as=return_as,
+            show_progress=show_progress,
+        )
     else:
         return bm25s.tokenize(texts, **tokenize_kwargs)
 
@@ -240,7 +257,14 @@ class DenseFaissRetriever:
             # Row ids are sequential, so list lookup is faster and smaller than dict lookup.
             self.row_id_to_doc_id = self.doc_ids
 
-        self.model = SentenceTransformer(model_name, device=device) if load_model else None
+        # self.model = SentenceTransformer(model_name, device=device) if load_model else None
+        if load_model:
+            self.model, self.emb_config = create_embedding_model(
+                model_name, normalize=self.normalize_embeddings, device=device or "cuda",
+            )
+        else:
+            self.model = None
+            self.emb_config = None
         self.index = None
         self.embeddings = None
 
@@ -328,14 +352,28 @@ class DenseFaissRetriever:
         if self.doc_texts is None:
             raise ValueError("corpus is required to build FAISS index")
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name, device=self.device)
+            self.model, self.emb_config = create_embedding_model(
+                self.model_name, normalize=self.normalize_embeddings, device=self.device or "cuda",
+            )
+
+        # Apply doc prefix if configured
+        texts_to_encode = self.doc_texts
+        if self.emb_config and self.emb_config.doc_prefix:
+            texts_to_encode = [self.emb_config.doc_prefix + t for t in self.doc_texts]
+
+        encode_kwargs = {}
+        if self.emb_config and self.emb_config.doc_prompt_name:
+            encode_kwargs["prompt_name"] = self.emb_config.doc_prompt_name
+        if self.emb_config and self.emb_config.doc_encode_kwargs:
+            encode_kwargs.update(self.emb_config.doc_encode_kwargs)
 
         embeddings = self.model.encode(
-            self.doc_texts,
+            texts_to_encode,
             batch_size=self.batch_size,
             show_progress_bar=True,
             convert_to_numpy=True,
             normalize_embeddings=self.normalize_embeddings,
+            **encode_kwargs,
         ).astype("float32")
 
         dim = embeddings.shape[1]
@@ -451,10 +489,23 @@ class DenseFaissRetriever:
         load_model=True,
     ):
         config_path = os.path.join(index_dir, config_filename)
+        # Also try index_config.json (format used by dense_indexing.py)
+        if not os.path.exists(config_path):
+            alt_config = os.path.join(index_dir, "index_config.json")
+            if os.path.exists(alt_config):
+                config_path = alt_config
+
         config = {}
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
+
+            # index_config.json from dense_indexing.py nests model info
+            # under "model_config". Flatten it for downstream use.
+            if "model_config" in config:
+                model_cfg = config["model_config"]
+                config.setdefault("model_name", model_cfg.get("model_id"))
+                config.setdefault("normalize_embeddings", model_cfg.get("normalize", True))
 
         model_name = model_name or config.get("model_name", "BAAI/bge-small-en-v1.5")
         batch_size = batch_size or config.get("batch_size", 128)
@@ -521,14 +572,28 @@ class DenseFaissRetriever:
         if isinstance(queries, str):
             queries = [queries]
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name, device=self.device)
+            self.model, self.emb_config = create_embedding_model(
+                self.model_name, normalize=self.normalize_embeddings, device=self.device or "cuda",
+            )
+
+        # Apply query prefix if configured
+        texts_to_encode = queries
+        if self.emb_config and self.emb_config.query_prefix:
+            texts_to_encode = [self.emb_config.query_prefix + q for q in queries]
+
+        encode_kwargs = {}
+        if self.emb_config and self.emb_config.query_prompt_name:
+            encode_kwargs["prompt_name"] = self.emb_config.query_prompt_name
+        if self.emb_config and self.emb_config.query_encode_kwargs:
+            encode_kwargs.update(self.emb_config.query_encode_kwargs)
 
         return self.model.encode(
-            queries,
+            texts_to_encode,
             batch_size=batch_size or self.batch_size,
             show_progress_bar=show_progress,
             convert_to_numpy=True,
             normalize_embeddings=self.normalize_embeddings,
+            **encode_kwargs,
         ).astype("float32")
 
     def retrieve_embeddings(
