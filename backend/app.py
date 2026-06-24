@@ -135,7 +135,7 @@ class SearchRequest(BaseModel):
     query: str
     mode: str = Field(default="hybrid", description="sparse | dense | hybrid")
     top_k: int = Field(default=10, ge=1, le=100)
-    fusion_strategy: str = Field(default="rrf", description="rrf | weighted_sum | combsum | combmnz | borda")
+    fusion_strategy: str = Field(default="rrf", description="rrf | weighted_sum | combsum | combmnz | borda | union")
     rrf_k: int = Field(default=60, ge=1)
     fusion_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     rerank: bool = Field(default=False, description="Enable CrossEncoder reranking")

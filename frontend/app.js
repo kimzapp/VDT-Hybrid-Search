@@ -180,10 +180,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 "weighted_sum": "Weighted Sum of Scores",
                 "combsum": "CombSUM Score Combination",
                 "combmnz": "CombMNZ Multiplier",
-                "borda": "Borda Count Ranking"
+                "borda": "Borda Count Ranking",
+                "union": "Union Candidate Pool"
             };
 
-            const available = data.available_fusion_strategies || ["rrf", "weighted_sum", "combsum", "combmnz", "borda"];
+            const available = data.available_fusion_strategies || ["rrf", "weighted_sum", "combsum", "combmnz", "borda", "union"];
             available.forEach(strategy => {
                 const opt = document.createElement("option");
                 opt.value = strategy;
@@ -203,6 +204,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 <option value="combsum">CombSUM Score Combination</option>
                 <option value="combmnz">CombMNZ Multiplier</option>
                 <option value="borda">Borda Count Ranking</option>
+                <option value="union">Union Candidate Pool</option>
             `;
             handleVisibilityRules();
         }

@@ -28,4 +28,3 @@ rm paraphrased-query.zip
 
 unzip runs-artifacts.zip -d runs
 rm runs-artifacts.zip
-rm runs-artifacts.zip

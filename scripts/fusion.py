@@ -203,6 +203,34 @@ def borda_fusion_all(sparse_results, dense_results, top_k=100, **kwargs):
 
 
 # =========================
+# 6. Union
+# =========================
+
+def union_fusion_one(sparse_run, dense_run, top_k=100):
+    """Union of candidates from sparse and dense retrievers.
+    
+    Combines candidate document IDs from both runs. Uses the maximum of their 
+    min-max normalized scores to provide a sensible ordering if the union 
+    needs to be truncated to top_k before reranking.
+    """
+    sparse_norm = _normalize_minmax(sparse_run)
+    dense_norm = _normalize_minmax(dense_run)
+    
+    all_doc_ids = set(sparse_norm.keys()) | set(dense_norm.keys())
+    fused = {}
+    for doc_id in all_doc_ids:
+        fused[doc_id] = max(sparse_norm.get(doc_id, 0.0), dense_norm.get(doc_id, 0.0))
+    
+    return _truncate(fused, top_k)
+
+
+def union_fusion_all(sparse_results, dense_results, top_k=100, **kwargs):
+    """Union fusion across all queries."""
+    return [union_fusion_one(sparse, dense, top_k=top_k)
+            for sparse, dense in zip(sparse_results, dense_results)]
+
+
+# =========================
 # Strategy Registry
 # =========================
 
@@ -212,6 +240,7 @@ FUSION_STRATEGIES = {
     "combsum":      combsum_fusion_all,
     "combmnz":      combmnz_fusion_all,
     "borda":        borda_fusion_all,
+    "union":        union_fusion_all,
 }
 
 
