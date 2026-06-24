@@ -1,26 +1,25 @@
 # download all files
-gdown "https://drive.google.com/open?id=1cRext5L6n6wfzX2rnFctcvZac4Q-p_In" -O bge_small_en_v1.5_embedding_faiss.zip 
-gdown "https://drive.google.com/open?id=1eglaqwloGB3m02QxHnMbqnLFzXHNJAqb" -O bm25_index.zip 
-gdown "https://drive.google.com/open?id=1cEcwGtloy_mfo2ljlFpY140tsgM7Xfiw" -O bm25_index_vi.zip 
-gdown "https://drive.google.com/open?id=1X0dtLmejxI3QVN8jx7fQwMDpE-6KEI7L" -O cache.zip 
-gdown "https://drive.google.com/open?id=1IhYBymIpM9ZzGaWMffLC3douQcj-NCPT" -O dense_index_vi.zip 
-gdown "https://drive.google.com/open?id=1qLwbCScylC9TUUbHT8oiTiVQPVdoXS6i" -O paraphrased_queries.zip 
-gdown "https://drive.google.com/open?id=1fSOfiqSa6pmc0WARBj_ZfbxhnJSmdJWE" -O runs.zip
+curl -L -o ./paraphrased-query.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/paraphrased-query
+curl -L -o ./bm25-index.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bm25-index
+curl -L -o ./cache-artifacts.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/cache-artifacts
+curl -L -o ./runs-artifacts.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/runs-artifacts
+curl -L -o ./bm25-index-vi.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bm25-index-vi
+
 
 # unzip all files
-unzip bge_small_en_v1.5_embedding_faiss.zip
-unzip bm25_index.zip
-unzip bm25_index_vi.zip
-unzip cache.zip
-unzip dense_index_vi.zip
-unzip paraphrased_queries.zip
-unzip runs.zip
+unzip bge-small-en-v15-embedding-faiss.zip
+unzip bm25-index.zip
+unzip bm25-index-vi.zip
+unzip cache-artifacts.zip
+unzip dense-index-vi.zip
+unzip paraphrased-query.zip
+unzip runs-artifacts.zip
 
 # remove zip files
-rm bge_small_en_v1.5_embedding_faiss.zip
-rm bm25_index.zip
-rm bm25_index_vi.zip
-rm cache.zip
-rm dense_index_vi.zip
-rm paraphrased_queries.zip
-rm runs.zip
+rm bge-small-en-v15-embedding-faiss.zip
+rm bm25-index.zip
+rm bm25-index-vi.zip
+rm cache-artifacts.zip
+rm dense-index-vi.zip
+rm paraphrased-query.zip
+rm runs-artifacts.zip
