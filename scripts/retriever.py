@@ -809,7 +809,7 @@ class CrossEncoderReranker:
         self.device = device
         self.model, self.config = create_reranker_model(model_name, device=device)
 
-    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None, final_top_k=None, wcr=False, wcr_alpha=0.5):
+    def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None, final_top_k=None, wcr=False, wcr_alpha=0.5, return_both_wcr=False):
         """
         Reranks a list of run dictionaries.
         
@@ -822,9 +822,10 @@ class CrossEncoderReranker:
             final_top_k: number of top documents to retain after reranking
             wcr: whether to apply Weighted Combination of two-stage Ranking
             wcr_alpha: weight for the retrieval score in WCR (0.0 to 1.0)
+            return_both_wcr: if True, returns a tuple of (standard_reranked, wcr_reranked)
         
         Returns:
-            list of reranked run dictionaries
+            list of reranked run dictionaries, or tuple of lists if return_both_wcr is True
         """
         if batch_size is None:
             batch_size = self.config.default_batch_size
@@ -861,42 +862,24 @@ class CrossEncoderReranker:
             all_scores = []
             
         reranked_run_dict_list = []
+        wcr_run_dict_list = []
         
         # Reconstruct run dictionaries
         for actual_top_docs, remaining_docs, start_idx, end_idx, original_run_dict in query_metadata:
             if start_idx == end_idx:
                 reranked_run_dict_list.append(original_run_dict)
+                if return_both_wcr:
+                    wcr_run_dict_list.append(original_run_dict)
                 continue
                 
             scores = all_scores[start_idx:end_idx]
             new_run_dict = {}
+            wcr_new_run_dict = {}
             
-            if wcr:
-                # Min-max normalize retrieval scores
-                retrieval_scores = [score for _, score in actual_top_docs]
-                min_ret = min(retrieval_scores) if retrieval_scores else 0
-                max_ret = max(retrieval_scores) if retrieval_scores else 0
+            # --- 1. Standard Rerank ---
+            for (doc_id, _), score in zip(actual_top_docs, scores):
+                new_run_dict[doc_id] = float(score)
                 
-                # Min-max normalize rerank scores
-                min_rerank = min(scores) if len(scores) > 0 else 0
-                max_rerank = max(scores) if len(scores) > 0 else 0
-                
-                # Combine
-                for (doc_id, original_score), rerank_score in zip(actual_top_docs, scores):
-                    norm_ret = (original_score - min_ret) / (max_ret - min_ret) if max_ret > min_ret else 0.5
-                    norm_rerank = (rerank_score - min_rerank) / (max_rerank - min_rerank) if max_rerank > min_rerank else 0.5
-                    combined_score = wcr_alpha * norm_ret + (1.0 - wcr_alpha) * norm_rerank
-                    new_run_dict[doc_id] = float(combined_score)
-                
-                # Update scores array for the remaining logic shift
-                scores = list(new_run_dict.values())
-            else:
-                # Add reranked docs
-                for (doc_id, _), score in zip(actual_top_docs, scores):
-                    new_run_dict[doc_id] = float(score)
-                
-            # Append remaining documents with lower scores so they don't affect top_k reranked results
-            # but are still available for deep metrics like recall@1000
             if remaining_docs:
                 min_rerank_score = min(scores) if len(scores) > 0 else 0.0
                 max_remaining_score = max(score for _, score in remaining_docs) if remaining_docs else 0.0
@@ -910,4 +893,43 @@ class CrossEncoderReranker:
             
             reranked_run_dict_list.append(new_run_dict)
             
-        return reranked_run_dict_list
+            # --- 2. WCR Rerank ---
+            if return_both_wcr or wcr:
+                # Min-max normalize retrieval scores
+                retrieval_scores = [score for _, score in actual_top_docs]
+                min_ret = min(retrieval_scores) if retrieval_scores else 0
+                max_ret = max(retrieval_scores) if retrieval_scores else 0
+                
+                # Min-max normalize rerank scores
+                min_rerank = min(scores) if len(scores) > 0 else 0
+                max_rerank = max(scores) if len(scores) > 0 else 0
+                
+                # Combine
+                wcr_scores = []
+                for (doc_id, original_score), rerank_score in zip(actual_top_docs, scores):
+                    norm_ret = (original_score - min_ret) / (max_ret - min_ret) if max_ret > min_ret else 0.5
+                    norm_rerank = (rerank_score - min_rerank) / (max_rerank - min_rerank) if max_rerank > min_rerank else 0.5
+                    combined_score = wcr_alpha * norm_ret + (1.0 - wcr_alpha) * norm_rerank
+                    wcr_new_run_dict[doc_id] = float(combined_score)
+                    wcr_scores.append(float(combined_score))
+                
+                # Append remaining docs
+                if remaining_docs:
+                    min_wcr_score = min(wcr_scores) if len(wcr_scores) > 0 else 0.0
+                    max_remaining_score = max(score for _, score in remaining_docs) if remaining_docs else 0.0
+                    shift = min_wcr_score - max_remaining_score - 1.0
+                    for doc_id, original_score in remaining_docs:
+                        wcr_new_run_dict[doc_id] = float(original_score + shift)
+                        
+                if final_top_k is not None:
+                    sorted_new_docs = sorted(wcr_new_run_dict.items(), key=lambda x: x[1], reverse=True)[:final_top_k]
+                    wcr_new_run_dict = {doc_id: score for doc_id, score in sorted_new_docs}
+                    
+                wcr_run_dict_list.append(wcr_new_run_dict)
+            
+        if return_both_wcr:
+            return reranked_run_dict_list, wcr_run_dict_list
+        elif wcr:
+            return wcr_run_dict_list
+        else:
+            return reranked_run_dict_list

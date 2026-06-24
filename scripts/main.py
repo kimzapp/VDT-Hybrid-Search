@@ -617,20 +617,36 @@ def main():
             print(f"   Reranking {run_name} (top_k={args.rerank_top_k})...")
             start = time.perf_counter()
             # Reranker uses raw texts, since its tokenizer handles raw text better than word-segmented text.
-            new_run_dict_list = reranker.rerank(
-                queries=raw_eval_query_texts,
-                run_dict_list=run_dict_list,
-                corpus=corpus,
-                top_k=args.rerank_top_k,
-                batch_size=args.rerank_batch_size,
-                final_top_k=args.final_top_k,
-                wcr=args.wcr,
-                wcr_alpha=args.wcr_alpha
-            )
-            rerank_time = time.perf_counter() - start
-            print_stat(f"   {run_name} Rerank time", f"{rerank_time:.2f}s")
-            new_name = f"{run_name} + Rerank (WCR)" if args.wcr else f"{run_name} + Rerank"
-            reranked_run_results[new_name] = new_run_dict_list
+            if args.wcr:
+                new_run_dict_list, wcr_run_dict_list = reranker.rerank(
+                    queries=raw_eval_query_texts,
+                    run_dict_list=run_dict_list,
+                    corpus=corpus,
+                    top_k=args.rerank_top_k,
+                    batch_size=args.rerank_batch_size,
+                    final_top_k=args.final_top_k,
+                    wcr=True,
+                    wcr_alpha=args.wcr_alpha,
+                    return_both_wcr=True
+                )
+                rerank_time = time.perf_counter() - start
+                print_stat(f"   {run_name} Rerank time", f"{rerank_time:.2f}s")
+                reranked_run_results[f"{run_name} + Rerank"] = new_run_dict_list
+                reranked_run_results[f"{run_name} + Rerank (WCR)"] = wcr_run_dict_list
+            else:
+                new_run_dict_list = reranker.rerank(
+                    queries=raw_eval_query_texts,
+                    run_dict_list=run_dict_list,
+                    corpus=corpus,
+                    top_k=args.rerank_top_k,
+                    batch_size=args.rerank_batch_size,
+                    final_top_k=args.final_top_k,
+                    wcr=False
+                )
+                rerank_time = time.perf_counter() - start
+                print_stat(f"   {run_name} Rerank time", f"{rerank_time:.2f}s")
+                reranked_run_results[f"{run_name} + Rerank"] = new_run_dict_list
+
             retrieval_stats[f"{run_name}_rerank_only"] = _latency_stats(rerank_time, len(raw_eval_query_texts))
             
         run_results.update(reranked_run_results)

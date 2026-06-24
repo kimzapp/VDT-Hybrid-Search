@@ -4,6 +4,7 @@ curl -L -o ./bm25-index.zip https://www.kaggle.com/api/v1/datasets/download/hong
 curl -L -o ./cache-artifacts.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/cache-artifacts
 curl -L -o ./runs-artifacts.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/runs-artifacts
 curl -L -o ./bm25-index-vi.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bm25-index-vi
+curl -L -o ./bge-small-en-v15-embedding-faiss.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bge-small-en-v15-embedding-faiss
 
 
 # unzip all files
