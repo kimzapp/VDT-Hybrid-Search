@@ -140,6 +140,8 @@ class SearchRequest(BaseModel):
     fusion_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     rerank: bool = Field(default=False, description="Enable CrossEncoder reranking")
     rerank_top_k: int = Field(default=100, ge=1, le=1000)
+    wcr: bool = Field(default=False, description="Enable Weighted Combination of two-stage Ranking")
+    wcr_alpha: float = Field(default=0.5, ge=0.0, le=1.0, description="Weight for retrieval score in WCR")
     date_from: Optional[str] = Field(default=None, description="Filter: min written_date (YYYY-MM-DD)")
     date_to: Optional[str] = Field(default=None, description="Filter: max written_date (YYYY-MM-DD)")
 
@@ -373,7 +375,9 @@ def search(req: SearchRequest):
                 queries=[req.query],
                 run_dict_list=[final_results],
                 corpus=temp_corpus,
-                top_k=req.rerank_top_k
+                top_k=req.rerank_top_k,
+                wcr=req.wcr,
+                wcr_alpha=req.wcr_alpha
             )[0]
             rerank_ms = (time.perf_counter() - t0_rerank) * 1000.0
         except Exception as e:

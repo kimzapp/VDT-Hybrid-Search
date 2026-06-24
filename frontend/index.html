@@ -154,7 +154,20 @@
                                     <input type="range" id="rerank-k-slider" min="10" max="1000" value="100" step="10" style="width: 100%;">
                                 </div>
                             </div>
-                            <span class="setting-desc">Applies CrossEncoder reranking to the top retrieved results for higher accuracy.</span>
+                            <div class="rerank-controls wcr-controls" id="wcr-settings" style="display: none; gap: 20px; align-items: center; margin-top: 10px; border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 10px;">
+                                <div class="checkbox-group">
+                                    <input type="checkbox" id="wcr-toggle">
+                                    <label for="wcr-toggle">Enable WCR (Weighted Combination)</label>
+                                </div>
+                                <div class="slider-group" style="flex: 1;">
+                                    <label for="wcr-alpha-slider" style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                                        <span>WCR Alpha (Retrieval Weight)</span>
+                                        <span class="val-display" id="wcr-alpha-val">0.50</span>
+                                    </label>
+                                    <input type="range" id="wcr-alpha-slider" min="0.0" max="1.0" value="0.5" step="0.05" style="width: 100%;">
+                                </div>
+                            </div>
+                            <span class="setting-desc">Applies CrossEncoder reranking to the top retrieved results for higher accuracy. WCR combines original retrieval scores with reranking scores.</span>
                         </div>
                     </div>
                 </div>

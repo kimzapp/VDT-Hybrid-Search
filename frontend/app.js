@@ -32,6 +32,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const rerankToggle = document.getElementById("rerank-toggle");
     const rerankKSlider = document.getElementById("rerank-k-slider");
     const rerankKVal = document.getElementById("rerank-k-val");
+    const wcrToggle = document.getElementById("wcr-toggle");
+    const wcrAlphaSlider = document.getElementById("wcr-alpha-slider");
+    const wcrAlphaVal = document.getElementById("wcr-alpha-val");
+    const wcrSettings = document.getElementById("wcr-settings");
 
     // Latency Elements
     const statsDashboard = document.getElementById("stats-dashboard");
@@ -140,6 +144,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
     rerankKSlider.addEventListener("input", (e) => {
         rerankKVal.textContent = e.target.value;
+    });
+
+    wcrAlphaSlider.addEventListener("input", (e) => {
+        wcrAlphaVal.textContent = parseFloat(e.target.value).toFixed(2);
+    });
+
+    rerankToggle.addEventListener("change", (e) => {
+        if (e.target.checked) {
+            wcrSettings.style.display = "flex";
+        } else {
+            wcrSettings.style.display = "none";
+        }
     });
 
     // 4b. Clear date filters button
@@ -259,6 +275,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 fusion_alpha: fusion_alpha,
                 rerank: rerankToggle.checked,
                 rerank_top_k: parseInt(rerankKSlider.value, 10),
+                wcr: wcrToggle ? wcrToggle.checked : false,
+                wcr_alpha: wcrAlphaSlider ? parseFloat(wcrAlphaSlider.value) : 0.5,
             };
             if (date_from) reqBody.date_from = date_from;
             if (date_to) reqBody.date_to = date_to;
