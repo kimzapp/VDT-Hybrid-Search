@@ -7,7 +7,6 @@ curl -L -o ./bm25-index-vi.zip https://www.kaggle.com/api/v1/datasets/download/h
 curl -L -o ./bge-small-en-v15-embedding-faiss.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bge-small-en-v15-embedding-faiss
 curl -L -o ./dense-index-vi.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/dense-index-vi
 
-
 # unzip all files
 unzip bge-small-en-v15-embedding-faiss.zip
 unzip bm25-index.zip
