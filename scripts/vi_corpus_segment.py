@@ -10,10 +10,24 @@ import ir_datasets
 from tqdm import tqdm
 
 
-def normalize_vi_text(text: str) -> str:
+def normalize_and_segment_vi(text: str) -> str:
+    from underthesea import word_tokenize
+    
+    # 1. Standardize Unicode
     text = unicodedata.normalize("NFC", text)
+    
+    # 2. Word tokenization (keeping case for named entity recognition)
+    text = word_tokenize(text, format="text")
+    
+    # 3. Lowercase
     text = text.lower()
+    
+    # 4. Remove punctuation (keep word characters and underscore)
+    text = re.sub(r"[^\w\s_]", " ", text)
+    
+    # 5. Clean up whitespace
     text = re.sub(r"\s+", " ", text).strip()
+    
     return text
 
 
@@ -31,11 +45,8 @@ def get_doc_text(doc: Any) -> str:
 
 
 def segment_one(obj):
-    from underthesea import word_tokenize
-
     doc_id = obj["doc_id"]
-    text = normalize_vi_text(obj["text"])
-    segmented = word_tokenize(text, format="text")
+    segmented = normalize_and_segment_vi(obj["text"])
 
     return {
         "doc_id": doc_id,

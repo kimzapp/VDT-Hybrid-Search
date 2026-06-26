@@ -5,7 +5,7 @@ import time
 import sys
 from datetime import datetime
 
-from vi_corpus_segment import normalize_vi_text
+from vi_corpus_segment import normalize_and_segment_vi
 
 # Parse --target_devices early to set CUDA_VISIBLE_DEVICES before importing torch/faiss
 if "--target_devices" in sys.argv:
@@ -61,14 +61,11 @@ def preprocess_vi_queries(query_texts: list[str]) -> list[str]:
     """Apply Vietnamese preprocessing to queries: NFC normalize + word segmentation.
     
     This mirrors the preprocessing applied to the corpus during index creation
-    in vi_corpus_segment.py (normalize_vi_text + underthesea.word_tokenize).
+    in vi_corpus_segment.py (normalize_and_segment_vi).
     """
-    from underthesea import word_tokenize
-
     processed = []
     for text in query_texts:
-        normalized = normalize_vi_text(text)
-        segmented = word_tokenize(normalized, format="text")
+        segmented = normalize_and_segment_vi(text)
         processed.append(segmented)
     return processed
 
