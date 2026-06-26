@@ -183,8 +183,10 @@ class BM25SRetriever:
         num_queries = sum(item["batch_size"] for item in batch_times)
         num_batches = len(batch_times)
         per_query = np.array([item["seconds_per_query"] for item in batch_times], dtype="float64")
+        batch_seconds = np.array([item["seconds"] for item in batch_times], dtype="float64")
 
         return {
+            "batch_size": int(batch_times[0]["batch_size"]) if batch_times else 0,
             "total_seconds": float(total_seconds),
             "num_queries": int(num_queries),
             "num_batches": int(num_batches),
@@ -195,6 +197,10 @@ class BM25SRetriever:
             "p90_batch_latency_ms_per_query": float(np.percentile(per_query, 90) * 1000),
             "p95_batch_latency_ms_per_query": float(np.percentile(per_query, 95) * 1000),
             "p99_batch_latency_ms_per_query": float(np.percentile(per_query, 99) * 1000),
+            "p50_batch_latency_ms": float(np.percentile(batch_seconds, 50) * 1000),
+            "p90_batch_latency_ms": float(np.percentile(batch_seconds, 90) * 1000),
+            "p95_batch_latency_ms": float(np.percentile(batch_seconds, 95) * 1000),
+            "p99_batch_latency_ms": float(np.percentile(batch_seconds, 99) * 1000),
         }
 
 
@@ -780,8 +786,10 @@ class DenseFaissRetriever:
         per_query = np.array([item["seconds_per_query"] for item in batch_times], dtype="float64")
         encode_per_query = np.array([item["encode_seconds_per_query"] for item in batch_times], dtype="float64")
         search_per_query = np.array([item["search_seconds_per_query"] for item in batch_times], dtype="float64")
+        batch_seconds = np.array([item["seconds"] for item in batch_times], dtype="float64")
 
         return {
+            "batch_size": int(batch_times[0]["batch_size"]) if batch_times else 0,
             "total_seconds": float(total_seconds),
             "total_encode_seconds": float(total_encode_seconds),
             "total_search_seconds": float(total_search_seconds),
@@ -796,6 +804,10 @@ class DenseFaissRetriever:
             "p90_batch_latency_ms_per_query": float(np.percentile(per_query, 90) * 1000),
             "p95_batch_latency_ms_per_query": float(np.percentile(per_query, 95) * 1000),
             "p99_batch_latency_ms_per_query": float(np.percentile(per_query, 99) * 1000),
+            "p50_batch_latency_ms": float(np.percentile(batch_seconds, 50) * 1000),
+            "p90_batch_latency_ms": float(np.percentile(batch_seconds, 90) * 1000),
+            "p95_batch_latency_ms": float(np.percentile(batch_seconds, 95) * 1000),
+            "p99_batch_latency_ms": float(np.percentile(batch_seconds, 99) * 1000),
             "p50_encode_ms_per_query": float(np.percentile(encode_per_query, 50) * 1000),
             "p50_faiss_search_ms_per_query": float(np.percentile(search_per_query, 50) * 1000),
         }
@@ -808,6 +820,40 @@ class CrossEncoderReranker:
         self.model_name = model_name
         self.device = device
         self.model, self.config = create_reranker_model(model_name, device=device)
+
+    def measure_per_query_latency(self, queries, run_dict_list, corpus, top_k=100, batch_size=None):
+        if batch_size is None:
+            batch_size = self.config.default_batch_size
+            
+        latencies = []
+        for query, run_dict in tqdm(zip(queries, run_dict_list), total=len(queries), desc="Measuring Rerank Per-Query Latency"):
+            sorted_docs = sorted(run_dict.items(), key=lambda x: x[1], reverse=True)
+            top_docs_to_rerank = sorted_docs[:top_k]
+            
+            pairs = []
+            for doc_id, _ in top_docs_to_rerank:
+                if doc_id in corpus:
+                    pairs.append([query, corpus[doc_id]])
+                    
+            if not pairs:
+                continue
+                
+            t0 = time.perf_counter()
+            self.model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+            t1 = time.perf_counter()
+            latencies.append(t1 - t0)
+            
+        if not latencies:
+            return {}
+            
+        lat_arr = np.array(latencies, dtype="float64")
+        return {
+            "p50_query_latency_ms": float(np.percentile(lat_arr, 50) * 1000),
+            "p90_query_latency_ms": float(np.percentile(lat_arr, 90) * 1000),
+            "p95_query_latency_ms": float(np.percentile(lat_arr, 95) * 1000),
+            "p99_query_latency_ms": float(np.percentile(lat_arr, 99) * 1000),
+            "avg_query_latency_ms": float(np.mean(lat_arr) * 1000),
+        }
 
     def rerank(self, queries, run_dict_list, corpus, top_k=100, batch_size=None, final_top_k=None, wcr=False, wcr_alpha=0.5, return_both_wcr=False):
         """

@@ -231,6 +231,8 @@ def parse_args():
         "--list_metrics", action="store_true",
         help="Print all supported metrics with descriptions and exit",
     )
+    parser.add_argument("--measure_per_query", action="store_true", help="Measure true per-query latency by running queries individually (batch_size=1)")
+    parser.add_argument("--per_query_samples", type=int, default=None, help="Number of queries to sample for per-query latency measurement (default: all)")
     
     return parser.parse_args()
 
@@ -609,12 +611,78 @@ def main():
         fusion_kwargs=fusion_kwargs,
     )
 
+    if args.measure_per_query:
+        import random
+        print_header("MEASURING PER-QUERY LATENCY (Retrieval)")
+        if args.per_query_samples is not None and args.per_query_samples < len(eval_query_texts):
+            sample_indices = random.sample(range(len(eval_query_texts)), args.per_query_samples)
+            sample_queries = [eval_query_texts[i] for i in sample_indices]
+            print(f"   Sampled {args.per_query_samples} queries for latency measurement.")
+        else:
+            sample_queries = eval_query_texts
+            print(f"   Measuring latency for all {len(sample_queries):,} queries.")
+            
+        if mode in ("sparse", "hybrid"):
+            print("   Measuring BM25S per-query latency...")
+            _, pq_stats = bm25_retriever.search_batched(
+                sample_queries, top_k=args.top_k, batch_size=1, show_progress=True, n_threads=1
+            )
+            retrieval_stats["bm25s_per_query"] = {
+                "p50_query_latency_ms": pq_stats.get("p50_batch_latency_ms", 0.0),
+                "p90_query_latency_ms": pq_stats.get("p90_batch_latency_ms", 0.0),
+                "p95_query_latency_ms": pq_stats.get("p95_batch_latency_ms", 0.0),
+                "p99_query_latency_ms": pq_stats.get("p99_batch_latency_ms", 0.0),
+            }
+            print_stat("BM25 p50 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p50_query_latency_ms"]))
+            print_stat("BM25 p95 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p95_query_latency_ms"]))
+            print_stat("BM25 p99 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p99_query_latency_ms"]))
+
+        if mode in ("dense", "hybrid"):
+            print("   Measuring Dense FAISS per-query latency...")
+            _, pq_stats = dense_retriever.search_batched(
+                sample_queries, top_k=args.top_k, batch_size=1, encode_batch_size=1, search_batch_size=1, show_progress=True
+            )
+            retrieval_stats["dense_faiss_per_query"] = {
+                "p50_query_latency_ms": pq_stats.get("p50_batch_latency_ms", 0.0),
+                "p90_query_latency_ms": pq_stats.get("p90_batch_latency_ms", 0.0),
+                "p95_query_latency_ms": pq_stats.get("p95_batch_latency_ms", 0.0),
+                "p99_query_latency_ms": pq_stats.get("p99_batch_latency_ms", 0.0),
+            }
+            print_stat("Dense p50 query latency", _fmt_ms(retrieval_stats["dense_faiss_per_query"]["p50_query_latency_ms"]))
+            print_stat("Dense p95 query latency", _fmt_ms(retrieval_stats["dense_faiss_per_query"]["p95_query_latency_ms"]))
+            print_stat("Dense p99 query latency", _fmt_ms(retrieval_stats["dense_faiss_per_query"]["p99_query_latency_ms"]))
+
+
     if args.rerank:
         print_header("RERANKING")
         reranker = CrossEncoderReranker(model_name=args.reranker_model, device=args.device)
         reranked_run_results = {}
         for run_name, run_dict_list in run_results.items():
             print(f"   Reranking {run_name} (top_k={args.rerank_top_k})...")
+            
+            if args.measure_per_query:
+                import random
+                if args.per_query_samples is not None and args.per_query_samples < len(raw_eval_query_texts):
+                    sample_indices = random.sample(range(len(raw_eval_query_texts)), args.per_query_samples)
+                    pq_queries = [raw_eval_query_texts[i] for i in sample_indices]
+                    pq_run_dict = [run_dict_list[i] for i in sample_indices]
+                else:
+                    pq_queries = raw_eval_query_texts
+                    pq_run_dict = run_dict_list
+                    
+                pq_stats = reranker.measure_per_query_latency(
+                    queries=pq_queries,
+                    run_dict_list=pq_run_dict,
+                    corpus=corpus,
+                    top_k=args.rerank_top_k,
+                    batch_size=args.rerank_batch_size,
+                )
+                retrieval_stats[f"{run_name}_rerank_per_query"] = pq_stats
+                if pq_stats:
+                    print_stat(f"   {run_name} p50 query latency", _fmt_ms(pq_stats.get("p50_query_latency_ms", 0.0)))
+                    print_stat(f"   {run_name} p95 query latency", _fmt_ms(pq_stats.get("p95_query_latency_ms", 0.0)))
+                    print_stat(f"   {run_name} p99 query latency", _fmt_ms(pq_stats.get("p99_query_latency_ms", 0.0)))
+
             start = time.perf_counter()
             # Reranker uses raw texts, since its tokenizer handles raw text better than word-segmented text.
             if args.wcr:
