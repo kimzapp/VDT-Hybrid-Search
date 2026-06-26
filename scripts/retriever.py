@@ -13,6 +13,9 @@ from sentence_transformers import SentenceTransformer
 import Stemmer
 from embedding_models import create_embedding_model
 from reranker_models import create_reranker_model
+import scipy.sparse as sp
+import torch
+from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 def custom_tokenize(texts, **tokenize_kwargs):
     """
@@ -979,3 +982,148 @@ class CrossEncoderReranker:
             return wcr_run_dict_list
         else:
             return reranked_run_dict_list
+
+
+class SpladeRetriever:
+    """
+    Retriever for SPLADE sparse indexes.
+    Uses a scipy.sparse.csr_matrix or csc_matrix for efficient batch dot-product search.
+    """
+    def __init__(self, model_id="naver/splade-v3", batch_size=128, device=None, max_seq_length=512):
+        self.model_id = model_id
+        self.batch_size = batch_size
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.max_seq_length = max_seq_length
+        self.doc_ids = None
+        self.index_matrix = None
+        self.index_matrix_T = None
+        
+        self.model = None
+        self.tokenizer = None
+        
+    def _load_model(self):
+        if self.model is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            # Suppress warning for torch_dtype=float16 by using torch_dtype (deprecated) or dtype
+            # We will use inference_mode so dtype is fine as is
+            self.model = AutoModelForMaskedLM.from_pretrained(self.model_id).to(self.device)
+            self.model.eval()
+
+    @classmethod
+    def load(cls, index_dir, batch_size=128, device=None):
+        config_path = os.path.join(index_dir, "index_config.json")
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            
+        model_id = config.get("model_id", "naver/splade-v3")
+        max_seq_length = config.get("max_seq_length", 512)
+        
+        obj = cls(model_id=model_id, batch_size=batch_size, device=device, max_seq_length=max_seq_length)
+        
+        # Load doc_ids
+        metadata_path = os.path.join(index_dir, "doc_ids.jsonl")
+        doc_ids = []
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            for expected_row_id, line in enumerate(f):
+                item = json.loads(line)
+                doc_ids.append(str(item["doc_id"]))
+        obj.doc_ids = doc_ids
+        
+        # Load sparse matrix
+        embeddings_path = os.path.join(index_dir, "embeddings.npz")
+        print(f"Loading sparse index from {embeddings_path}...")
+        obj.index_matrix = sp.load_npz(embeddings_path)
+        # Pre-transpose for faster retrieval
+        obj.index_matrix_T = obj.index_matrix.T.tocsc()
+        
+        print(f"Loaded SPLADE index. Corpus size: {len(doc_ids):,}, Matrix shape: {obj.index_matrix.shape}")
+        return obj
+
+    def encode_queries(self, queries):
+        self._load_model()
+        all_vectors = []
+        
+        for i in range(0, len(queries), self.batch_size):
+            batch_texts = queries[i : i + self.batch_size]
+            inputs = self.tokenizer(
+                batch_texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_tensors="pt",
+            ).to(self.device)
+
+            with torch.inference_mode():
+                outputs = self.model(**inputs)
+                logits = outputs.logits
+                relu_logits = torch.relu(logits)
+                log_relu_logits = torch.log1p(relu_logits)
+                attention_mask = inputs["attention_mask"].unsqueeze(-1)
+                masked_logits = log_relu_logits * attention_mask
+                max_pooled = torch.max(masked_logits, dim=1).values
+                batch_vectors = max_pooled.cpu().numpy()
+                batch_vectors[batch_vectors < 1e-4] = 0.0
+                all_vectors.append(sp.csr_matrix(batch_vectors))
+                
+        if not all_vectors:
+            return sp.csr_matrix((0, self.model.config.vocab_size))
+        return sp.vstack(all_vectors)
+
+    def search(self, queries, top_k=100, return_dict=True):
+        if isinstance(queries, str):
+            queries = [queries]
+            
+        q_sparse = self.encode_queries(queries)
+        
+        # Dot product
+        scores_matrix = q_sparse.dot(self.index_matrix_T)
+        
+        results = []
+        for i in range(scores_matrix.shape[0]):
+            row = scores_matrix.getrow(i)
+            if len(row.data) == 0:
+                results.append({})
+                continue
+                
+            if len(row.data) <= top_k:
+                top_indices = np.argsort(-row.data)
+            else:
+                top_indices = np.argpartition(-row.data, top_k - 1)[:top_k]
+                top_indices = top_indices[np.argsort(-row.data[top_indices])]
+                
+            doc_indices = row.indices[top_indices]
+            doc_scores = row.data[top_indices]
+            
+            run_dict = {self.doc_ids[idx]: float(score) for idx, score in zip(doc_indices, doc_scores)}
+            results.append(run_dict)
+            
+        if return_dict:
+            return results
+        else:
+            return [[doc_id for doc_id in res.keys()] for res in results], [[score for score in res.values()] for res in results]
+            
+    def search_batched(self, queries, top_k=100, batch_size=128, show_progress=True):
+        if isinstance(queries, str):
+            queries = [queries]
+            
+        all_results = []
+        batch_times = []
+        iterator = range(0, len(queries), batch_size)
+        if show_progress:
+            iterator = tqdm(iterator, desc="SPLADE batched search")
+
+        for start_idx in iterator:
+            batch_queries = queries[start_idx:start_idx + batch_size]
+            start = time.perf_counter()
+            batch_results = self.search(batch_queries, top_k=top_k, return_dict=True)
+            elapsed = time.perf_counter() - start
+            all_results.extend(batch_results)
+            batch_times.append({
+                "batch_size": len(batch_queries),
+                "seconds": elapsed,
+                "seconds_per_query": elapsed / len(batch_queries),
+            })
+            
+        stats = BM25SRetriever._latency_stats_from_batches(batch_times)
+        return all_results, stats
+
