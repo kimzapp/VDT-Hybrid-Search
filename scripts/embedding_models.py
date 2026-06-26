@@ -141,6 +141,56 @@ MODEL_REGISTRY: Dict[str, EmbeddingModelConfig] = {
         note="Requires Nomic search_query/search_document prefixes.",
     ),
 
+    # NV-Embed-v2: High performance 7B model from NVIDIA
+    "nv_embed_v2": EmbeddingModelConfig(
+        model_id="nvidia/NV-Embed-v2",
+        query_prefix="Instruct: Given a question, retrieve passages that answer the question.\nQuery: ",
+        trust_remote_code=True,
+        normalize=True,
+        max_seq_length=4096, # Can support longer context up to 32k depending on VRAM
+        note="State-of-the-art 7B model. Ensure you use --dtype bfloat16 or float16 and have sufficient VRAM.",
+    ),
+
+    # Linq-Embed-Mistral: Mistral based embedding model
+    "linq_embed_mistral": EmbeddingModelConfig(
+        model_id="Linq-AI-Research/Linq-Embed-Mistral",
+        query_prefix="Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
+        trust_remote_code=True,
+        normalize=True,
+        max_seq_length=4096,
+        note="Mistral-based 7B model. Requires bfloat16/float16.",
+    ),
+
+    # SFR-Embedding-Mistral: State-of-the-art retrieval model from Salesforce
+    "sfr_embed_mistral": EmbeddingModelConfig(
+        model_id="Salesforce/SFR-Embedding-Mistral",
+        query_prefix="Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
+        trust_remote_code=True,
+        normalize=True,
+        max_seq_length=4096,
+        note="Salesforce 7B Mistral-based model. Requires bfloat16/float16.",
+    ),
+
+    # E5-Mistral-7b-instruct: Mistral-based E5 model
+    "e5_mistral_7b": EmbeddingModelConfig(
+        model_id="intfloat/e5-mistral-7b-instruct",
+        query_prompt_name="web_search_query", # Uses SentenceTransformers built-in prompt mapping
+        trust_remote_code=True,
+        normalize=True,
+        max_seq_length=4096,
+        note="E5 7B Mistral-based model. Requires bfloat16/float16.",
+    ),
+
+    # BAAI/bge-en-icl: In-Context Learning embedding model
+    "bge_en_icl": EmbeddingModelConfig(
+        model_id="BAAI/bge-en-icl",
+        query_prefix="<instruct>Given a web search query, retrieve relevant passages that answer the query.\n<query>",
+        trust_remote_code=True,
+        normalize=True,
+        max_seq_length=4096,
+        note="BGE ICL model. Though best with FlagICLModel and examples, this uses zero-shot prefix for SentenceTransformers compatibility.",
+    ),
+
     # Lightweight lower bound.
     "minilm_l6": EmbeddingModelConfig(
         model_id="sentence-transformers/all-MiniLM-L6-v2",

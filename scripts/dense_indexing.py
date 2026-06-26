@@ -131,6 +131,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only save embeddings.npy and doc_ids.jsonl; skip FAISS index building.",
     )
+    parser.add_argument(
+        "--metric_type",
+        type=str,
+        default="auto",
+        choices=["auto", "ip", "l2"],
+        help="FAISS index metric type: 'ip' (IndexFlatIP) or 'l2' (IndexFlatL2). If 'auto', uses 'ip' when normalizing, 'l2' otherwise.",
+    )
 
     # Optional override of prefixes. Useful for ablation.
     parser.add_argument("--doc_prefix", type=str, default=None)
@@ -417,6 +424,7 @@ def main() -> None:
     print(f"batch_size      : {args.batch_size}")
     print(f"chunk_size      : {args.chunk_size}")
     print(f"normalize       : {cfg.normalize}")
+    print(f"metric_type     : {args.metric_type}")
     print(f"dtype           : {args.dtype}")
     print(f"doc_prefix      : {repr(cfg.doc_prefix)}")
     print(f"query_prefix    : {repr(cfg.query_prefix)}")
@@ -555,6 +563,11 @@ def main() -> None:
     print(f"Saved embeddings: {emb_path}")
     print(f"Saved metadata  : {metadata_path}")
 
+    if args.metric_type == "auto":
+        use_ip = cfg.normalize
+    else:
+        use_ip = (args.metric_type == "ip")
+
     def export_run_configs(faiss_built: bool) -> None:
         """Export the exact config used for this index and a snapshot of the in-code registry."""
         saved_config = {
@@ -565,8 +578,10 @@ def main() -> None:
             "num_docs": num_docs,
             "embedding_dim": embedding_dim,
             "normalize_embeddings": cfg.normalize,
-            "similarity": "cosine_via_inner_product" if cfg.normalize else "l2",
-            "faiss_index_type": None if args.skip_faiss else ("IndexIDMap2(IndexFlatIP)" if cfg.normalize else "IndexIDMap2(IndexFlatL2)"),
+            "similarity": "cosine_via_inner_product" if use_ip else "l2",
+            "faiss_index_type": None if args.skip_faiss else ("IndexIDMap2(IndexFlatIP)" if use_ip else "IndexIDMap2(IndexFlatL2)"),
+            "index_type": "flat",
+            "metric_type": "ip" if use_ip else "l2",
             "faiss_built": bool(faiss_built),
             "paths": {
                 "embeddings": emb_path,
@@ -598,7 +613,7 @@ def main() -> None:
     print("\nBuilding exact FAISS index...")
     embeddings_mmap = np.load(emb_path, mmap_mode="r")
 
-    base_index = faiss.IndexFlatIP(embedding_dim) if cfg.normalize else faiss.IndexFlatL2(embedding_dim)
+    base_index = faiss.IndexFlatIP(embedding_dim) if use_ip else faiss.IndexFlatL2(embedding_dim)
     index = faiss.IndexIDMap2(base_index)
 
     add_batch = args.faiss_add_batch_size or args.chunk_size
