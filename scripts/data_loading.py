@@ -20,7 +20,7 @@ def preview_iter(title, iterator, fields, n=5):
             print(f"{field}:", value)
 
 
-def download_and_preview_msmarco(corpus_id="msmarco-passage", eval_id="msmarco-passage/dev/small", n_samples=1):
+def download_and_preview_msmarco(corpus_id="msmarco-passage", eval_id="msmarco-passage/dev/small", n_samples=1, load_corpus=False):
     # Auto-register paraphrased datasets if eval_id refers to one.
     # Registration only lives in-process, so we must re-register every time.
     if "/paraphrased/" in eval_id:
@@ -40,10 +40,14 @@ def download_and_preview_msmarco(corpus_id="msmarco-passage", eval_id="msmarco-p
     queries = {}
     qrels = {}
 
-    print("\n========== LOADING FULL CORPUS ==========")
-    for doc in tqdm(passages.docs_iter(), desc="Loading passages"):
-        corpus[doc.doc_id] = doc.text
-    print(f"Total passages loaded: {len(corpus):,}")
+    corpus = {}
+    if load_corpus:
+        print("\n========== LOADING FULL CORPUS ==========")
+        for doc in tqdm(passages.docs_iter(), desc="Loading passages"):
+            corpus[doc.doc_id] = doc.text
+        print(f"Total passages loaded: {len(corpus):,}")
+    else:
+        print("\n========== SKIPPING FULL CORPUS LOAD ==========")
 
     print("\n========== LOADING QUERIES ==========")
     for query in tqdm(eval_set.queries_iter(), desc="Loading queries"):

@@ -506,7 +506,11 @@ def main():
     print_stat("RUN_ID", run_id)
     
     # Download overrides the print internally, could suppress or leave alone
-    corpus, queries, qrels = download_and_preview_msmarco(corpus_id=args.corpus_id, eval_id=args.eval_id)
+    corpus, queries, qrels = download_and_preview_msmarco(
+        corpus_id=args.corpus_id, 
+        eval_id=args.eval_id, 
+        load_corpus=args.rerank
+    )
 
     # --- Load retrievers conditionally based on mode ---
     print_header("LOADING RETRIEVERS")
