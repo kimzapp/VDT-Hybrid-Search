@@ -45,8 +45,12 @@ def main():
 
     doc_ids, doc_texts = load_segmented_corpus(segmented_corpus_path)
 
+    import re
+    def vi_bm25_splitter(text):
+        return re.findall(r"[\w_]+", text.lower())
+
     tokenizer = Tokenizer(
-        splitter=str.split,
+        splitter=vi_bm25_splitter,
         stopwords=[],
         stemmer=None,
     )

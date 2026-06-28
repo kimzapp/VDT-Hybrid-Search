@@ -16,17 +16,8 @@ def normalize_and_segment_vi(text: str) -> str:
     # 1. Standardize Unicode
     text = unicodedata.normalize("NFC", text)
     
-    # 2. Word tokenization (keeping case for named entity recognition)
+    # 2. Word tokenization (keeping case and punctuation for Dense models)
     text = word_tokenize(text, format="text")
-    
-    # 3. Lowercase
-    text = text.lower()
-    
-    # 4. Remove punctuation (keep word characters and underscore)
-    text = re.sub(r"[^\w\s_]", " ", text)
-    
-    # 5. Clean up whitespace
-    text = re.sub(r"\s+", " ", text).strip()
     
     return text
 

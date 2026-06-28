@@ -523,10 +523,14 @@ def main():
 
     if mode in ("sparse", "hybrid"):
         print(f"   Loading sparse retriever (BM25S)...")
-        # For Vietnamese index: use str.split (matching the index tokenizer),
-        # no stemmer, no stopwords — the text is already segmented.
+        import re
+        def vi_bm25_splitter(text):
+            return re.findall(r"[\w_]+", text.lower())
+
+        # For Vietnamese index: use custom regex splitter to strip punctuation 
+        # and lowercase text, matching the BM25S index tokenizer.
         bm25_tokenize_kwargs = (
-            {"splitter": str.split, "stopwords": [], "stemmer": None}
+            {"splitter": vi_bm25_splitter, "stopwords": [], "stemmer": None}
             if vi_mode
             else {}
         )

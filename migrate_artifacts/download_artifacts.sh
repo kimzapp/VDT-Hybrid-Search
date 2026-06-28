@@ -6,6 +6,7 @@ curl -L -o ./runs-artifacts.zip https://www.kaggle.com/api/v1/datasets/download/
 curl -L -o ./bm25-index-vi.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bm25-index-vi
 curl -L -o ./bge-small-en-v15-embedding-faiss.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/bge-small-en-v15-embedding-faiss
 curl -L -o ./dense-index-vi.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/dense-index-vi
+curl -L -o ./splade-small-index.zip https://www.kaggle.com/api/v1/datasets/download/hongkimgip/splade-small-index
 
 # unzip all files
 unzip bge-small-en-v15-embedding-faiss.zip -d bge_small_en_v1.5_embedding_faiss
@@ -28,3 +29,6 @@ rm paraphrased-query.zip
 
 unzip runs-artifacts.zip -d runs
 rm runs-artifacts.zip
+
+unzip splade-small-index.zip -d splade_small_index
+rm splade-small-index.zip
