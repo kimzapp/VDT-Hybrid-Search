@@ -23,7 +23,7 @@ if "--target_devices" in sys.argv:
 from retriever import BM25SRetriever, DenseFaissRetriever, CrossEncoderReranker
 from data_loading import download_and_preview_msmarco
 from fusion import get_fusion_fn, list_strategies
-from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report
+from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report, save_trec_run
 
 
 # All metric families supported by ranx (use metric@k format, e.g. ndcg@10)
@@ -615,6 +615,16 @@ def main():
         fusion_strategy=args.fusion_strategy,
         fusion_kwargs=fusion_kwargs,
     )
+
+    print_header("SAVING RETRIEVAL RUNS (PRE-RERANKING)")
+    trec_run_dir = os.path.join(save_path, "trec_runs")
+    os.makedirs(trec_run_dir, exist_ok=True)
+    
+    pre_rerank_run_dicts = {name: make_run_dict(eval_query_ids, results) for name, results in run_results.items()}
+    for run_name, run_dict in pre_rerank_run_dicts.items():
+        output_path = os.path.join(trec_run_dir, f"{run_name}.trec")
+        save_trec_run(run_dict, output_path, run_name=run_name)
+        print(f"   Saved {run_name} to {output_path}")
 
     if args.measure_per_query:
         import random
