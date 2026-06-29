@@ -111,9 +111,6 @@ def split_existing_index(args, topic_map, topics):
             
         print(f"Topic '{topic}': building index with {len(topic_row_indices)} documents...")
         
-        # Extract embeddings
-        topic_embeddings = embeddings[topic_row_indices]
-        
         # Build new FAISS index (IndexFlatIP or L2)
         # Check original metric
         metric = index.metric_type
@@ -124,9 +121,18 @@ def split_existing_index(args, topic_map, topics):
             
         topic_index = faiss.IndexIDMap2(base_index)
         
-        # Add to index
+        # Add to index in batches to save memory
         row_ids = np.arange(len(topic_doc_id_list), dtype="int64")
-        topic_index.add_with_ids(topic_embeddings.astype("float32"), row_ids)
+        batch_size = 500000
+        
+        for i in range(0, len(topic_row_indices), batch_size):
+            batch_indices = topic_row_indices[i:i+batch_size]
+            batch_emb = embeddings[batch_indices].astype("float32")
+            batch_row_ids = row_ids[i:i+batch_size]
+            topic_index.add_with_ids(batch_emb, batch_row_ids)
+            del batch_emb
+            del batch_row_ids
+            gc.collect()
         
         # Save FAISS
         faiss.write_index(topic_index, os.path.join(topic_dir, "faiss.index"))
