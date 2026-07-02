@@ -1061,6 +1061,21 @@ mark.query-highlight {
     font-size: 0.65rem;
 }
 
+.modal-passage-topic {
+    font-size: 0.72rem;
+    color: var(--accent-total);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(162, 119, 255, 0.1);
+    padding: 2px 8px;
+    border-radius: 6px;
+}
+
+.modal-passage-topic i {
+    font-size: 0.65rem;
+}
+
 .modal-passage-text {
     font-size: 0.88rem;
     line-height: 1.55;

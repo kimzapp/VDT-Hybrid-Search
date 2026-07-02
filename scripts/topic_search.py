@@ -21,18 +21,8 @@ if "--target_devices" in sys.argv:
         print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} before loading libraries.")
 
 import numpy as np
-import faiss
-import torch
 from tqdm import tqdm
 
-try:
-    from gliclass import GLiClassModel, ZeroShotClassificationPipeline
-    from transformers import AutoTokenizer
-except ImportError:
-    print("Please install gliclass and transformers: pip install gliclass transformers")
-    exit(1)
-
-from embedding_models import create_embedding_model
 from retriever import CrossEncoderReranker
 from data_loading import download_and_preview_msmarco
 from fusion import get_fusion_fn, list_strategies
@@ -125,10 +115,6 @@ def parse_args():
     # Query classification config
     parser.add_argument("--classifier_model", type=str, default="knowledgator/gliclass-modern-base-v2.0-init",
                         help="Model to use for query classification")
-    parser.add_argument("--classifier_threshold", type=float, default=0.5,
-                        help="Threshold for query multi-topic classification")
-    parser.add_argument("--max_topics_per_query", type=int, default=5,
-                        help="Max topics to search per query. Set to -1 for all topics passing threshold")
     parser.add_argument("--classifier_batch_size", type=int, default=128,
                         help="Batch size for query classification")
     
@@ -247,222 +233,77 @@ def _fmt_ms(value):
 # =========================
 
 class TopicSearchPipeline:
-    """Loads topic-partitioned FAISS indexes and a query classifier to route queries
-    to the relevant topic shards for dense retrieval."""
-    
-    def __init__(self, index_dir, classifier_model, device="cuda"):
-        self.index_dir = index_dir
-        self.device = device
-        
-        # Load manifest
-        manifest_path = os.path.join(index_dir, "topic_index_manifest.json")
-        if not os.path.exists(manifest_path):
-            raise FileNotFoundError(f"Missing {manifest_path}")
-            
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            self.manifest = json.load(f)
-            
-        self.topics = self.manifest["topics"]
-        self.model_key = self.manifest["model_key"]
-        
-        # Load embedding model
-        print(f"   Loading embedding model: {self.model_key}")
-        self.embed_model, self.emb_config = create_embedding_model(
-            self.model_key, normalize=True, device=device
-        )
-        
-        # Load topic classifier
-        print(f"   Loading query classifier: {classifier_model}")
-        model = GLiClassModel.from_pretrained(classifier_model)
-        tokenizer = AutoTokenizer.from_pretrained(classifier_model, add_prefix_space=True)
-        self.classifier = ZeroShotClassificationPipeline(
-            model, tokenizer, 
-            classification_type='multi-label', 
-            device=device
-        )
-        
-        # Load all FAISS indexes into CPU RAM
-        print(f"   Loading {len(self.topics)} FAISS indexes into memory...")
-        self.topic_indexes = {}
-        self.topic_doc_ids = {}
-        
-        for topic in tqdm(self.topics, desc="Loading indexes"):
-            topic_dir = os.path.join(index_dir, topic)
-            if not os.path.exists(topic_dir):
-                continue
-                
-            faiss_path = os.path.join(topic_dir, "faiss.index")
-            metadata_path = os.path.join(topic_dir, "doc_ids.jsonl")
-            
-            if not os.path.exists(faiss_path) or not os.path.exists(metadata_path):
-                continue
-                
-            # Load index
-            self.topic_indexes[topic] = faiss.read_index(faiss_path)
-            
-            # Load doc IDs
-            doc_ids = []
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    doc_ids.append(str(json.loads(line)["doc_id"]))
-            self.topic_doc_ids[topic] = doc_ids
-            
-        print(f"   Successfully loaded {len(self.topic_indexes)} topic shards.")
+    """Thin wrapper around :class:`TopicRouter` that adds evaluation-specific
+    console output and latency stats formatting.
 
-    def classify_queries(self, queries, threshold=0.5, max_topics=5):
-        """Classify queries into topics using the zero-shot classifier."""
-        results = self.classifier(queries, self.topics, threshold=threshold)
-        
-        query_topics = []
-        for res in results:
-            # Sort by score descending
-            sorted_res = sorted(res, key=lambda x: x["score"], reverse=True)
-            
-            # Keep top-K topics that pass threshold
-            if max_topics > 0:
-                selected = [r["label"] for r in sorted_res[:max_topics]]
-            else:
-                selected = [r["label"] for r in sorted_res]
-            
-            if not selected:
-                # Fallback to top-1 if none pass threshold
-                if sorted_res:
-                    selected = [sorted_res[0]["label"]]
-                else:
-                    selected = [self.topics[0]]  # absolute fallback
-                    
-            query_topics.append(selected)
-            
-        return query_topics
-        
+    All heavy lifting (FAISS index loading, classifier init, embedding model
+    loading) is delegated to the shared ``TopicRouter`` module so that the same
+    code can be reused by the FastAPI backend.
+    """
+
+    def __init__(self, index_dir, classifier_model, device="cuda"):
+        from topic_router import TopicRouter
+
+        self.router = TopicRouter(
+            index_dir=index_dir,
+            classifier_model=classifier_model,
+            device=device,
+        )
+
     def search(self, qids, queries, top_k=100, final_top_k=100, batch_size=128,
-               threshold=0.5, max_topics=5, classifier_batch_size=128):
-        """Run the full topic-partitioned dense search pipeline:
-        1. Classify queries into topics
-        2. Encode queries
-        3. Search in relevant topic shards
-        4. Merge results
-        
+               classifier_batch_size=128):
+        """Run the full topic-partitioned dense search pipeline via TopicRouter.
+
         Returns:
             (results_list, retrieval_stats)
         """
+        # Delegate to TopicRouter.search()
+        results, router_stats = self.router.search(
+            queries=queries,
+            top_k=top_k,
+            final_top_k=final_top_k,
+            encode_batch_size=batch_size,
+            classifier_batch_size=classifier_batch_size,
+        )
+
+        # --- Format retrieval_stats for backward-compatibility ---
+        classify_time = router_stats["classify_seconds"]
+        encode_time = router_stats["encode_seconds"]
+        search_time = router_stats["search_seconds"]
+        total_retrieval_time = router_stats["total_seconds"]
+        topic_counts = router_stats["topic_distribution"]
+        avg_topics = router_stats["avg_topics_per_query"]
+
         retrieval_stats = {}
-        
-        # --- Step 1: Query classification ---
-        print_header("QUERY CLASSIFICATION")
-        print_stat("Classifier threshold", threshold)
-        print_stat("Max topics per query", max_topics)
-        
-        classify_start = time.perf_counter()
-        query_topics = []
-        for i in tqdm(range(0, len(queries), classifier_batch_size), desc="Classifying queries"):
-            batch_q = queries[i:i+classifier_batch_size]
-            query_topics.extend(self.classify_queries(batch_q, threshold, max_topics))
-        classify_time = time.perf_counter() - classify_start
-        
-        # Classification stats
-        topic_counts = {}
-        total_topics_assigned = 0
-        for topics in query_topics:
-            total_topics_assigned += len(topics)
-            for t in topics:
-                topic_counts[t] = topic_counts.get(t, 0) + 1
-        avg_topics = total_topics_assigned / len(query_topics) if query_topics else 0
-        
+
         retrieval_stats["classification"] = _latency_stats(classify_time, len(queries), classifier_batch_size)
         retrieval_stats["classification"]["avg_topics_per_query"] = avg_topics
         retrieval_stats["classification"]["topic_distribution"] = topic_counts
-        
+
+        retrieval_stats["query_encoding"] = _latency_stats(encode_time, len(queries), batch_size)
+        retrieval_stats["topic_search"] = _latency_stats(search_time, len(queries))
+        retrieval_stats["end_to_end"] = _latency_stats(total_retrieval_time, len(queries))
+
+        # --- Console output ---
+        print_header("QUERY CLASSIFICATION")
         print_stat("Classification time", f"{classify_time:.2f}s")
         print_stat("Avg topics per query", f"{avg_topics:.2f}")
         print_stat("Topic distribution", "")
         for topic, count in sorted(topic_counts.items(), key=lambda x: x[1], reverse=True):
             print(f"      {topic:<30}: {count:,} queries")
-        
-        # --- Step 2: Encode queries ---
+
         print_header("ENCODING QUERIES")
-        texts_to_encode = queries
-        if self.emb_config and self.emb_config.query_prefix:
-            texts_to_encode = [self.emb_config.query_prefix + q for q in queries]
-            
-        encode_kwargs = {}
-        if self.emb_config and self.emb_config.query_prompt_name:
-            encode_kwargs["prompt_name"] = self.emb_config.query_prompt_name
-        if self.emb_config and self.emb_config.query_encode_kwargs:
-            encode_kwargs.update(self.emb_config.query_encode_kwargs)
-            
-        encode_start = time.perf_counter()
-        query_embeddings = self.embed_model.encode(
-            texts_to_encode,
-            batch_size=batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True,
-            normalize_embeddings=self.emb_config.normalize,
-            **encode_kwargs
-        ).astype("float32")
-        encode_time = time.perf_counter() - encode_start
-        
-        retrieval_stats["query_encoding"] = _latency_stats(encode_time, len(queries), batch_size)
         print_stat("Encode time", f"{encode_time:.2f}s")
         print_stat("Avg encode/query", f"{encode_time / len(queries):.4f}s")
-        
-        # --- Step 3: Search in topic-partitioned indexes ---
+
         print_header(f"TOPIC-PARTITIONED DENSE SEARCH (TOP_K={top_k}, FINAL_TOP_K={final_top_k})")
-        search_start = time.perf_counter()
-        all_results = []
-        
-        for i, (qid, q_emb, topics) in enumerate(tqdm(
-            zip(qids, query_embeddings, query_topics), total=len(qids), desc="Retrieving"
-        )):
-            # Reshape for faiss
-            q_emb = q_emb.reshape(1, -1)
-            
-            # Merge results from multiple topic shards
-            merged_scores = {}
-            
-            for topic in topics:
-                if topic not in self.topic_indexes:
-                    continue
-                    
-                index = self.topic_indexes[topic]
-                doc_ids = self.topic_doc_ids[topic]
-                
-                # We can't search more than the index size
-                search_k = min(top_k, index.ntotal)
-                if search_k == 0:
-                    continue
-                    
-                scores, row_ids = index.search(q_emb, search_k)
-                
-                for score, row_id in zip(scores[0], row_ids[0]):
-                    if row_id == -1:
-                        continue
-                    doc_id = doc_ids[row_id]
-                    
-                    # If doc found in multiple topics, keep max score
-                    if doc_id not in merged_scores or score > merged_scores[doc_id]:
-                        merged_scores[doc_id] = float(score)
-                        
-            # Sort merged results and keep final_top_k
-            sorted_docs = sorted(merged_scores.items(), key=lambda x: x[1], reverse=True)[:final_top_k]
-            
-            # Convert to run format
-            run_dict = {doc_id: score for doc_id, score in sorted_docs}
-            all_results.append(run_dict)
-            
-        search_time = time.perf_counter() - search_start
-        total_retrieval_time = classify_time + encode_time + search_time
-        
-        retrieval_stats["topic_search"] = _latency_stats(search_time, len(queries))
-        retrieval_stats["end_to_end"] = _latency_stats(total_retrieval_time, len(queries))
-        
         print_stat("FAISS search time", f"{search_time:.2f}s")
         print_stat("Avg search/query", f"{search_time / len(queries):.4f}s")
         print_stat("End-to-end time", f"{total_retrieval_time:.2f}s")
         print_stat("End-to-end avg/query", f"{total_retrieval_time / len(queries):.4f}s")
         print_stat("End-to-end QPS", f"{len(queries) / total_retrieval_time:.2f}")
-        
-        return all_results, retrieval_stats
+
+        return results, retrieval_stats
 
 
 # =========================
@@ -530,8 +371,6 @@ def main():
         top_k=args.top_k,
         final_top_k=args.final_top_k,
         batch_size=args.batch_size,
-        threshold=args.classifier_threshold,
-        max_topics=args.max_topics_per_query,
         classifier_batch_size=args.classifier_batch_size,
     )
     
@@ -569,8 +408,7 @@ def main():
             pipeline.search(
                 qids=[sqid], queries=[sq],
                 top_k=args.top_k, final_top_k=args.final_top_k,
-                batch_size=1, threshold=args.classifier_threshold,
-                max_topics=args.max_topics_per_query, classifier_batch_size=1,
+                batch_size=1, classifier_batch_size=1,
             )
             per_query_latencies.append((time.perf_counter() - pq_start) * 1000)  # ms
         

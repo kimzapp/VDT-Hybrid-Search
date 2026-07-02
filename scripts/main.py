@@ -20,7 +20,7 @@ if "--target_devices" in sys.argv:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
         print(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} before loading libraries.")
 
-from retriever import BM25SRetriever, DenseFaissRetriever, CrossEncoderReranker
+from retriever import BM25SRetriever, DenseFaissRetriever, CrossEncoderReranker, SpladeRetriever
 from data_loading import download_and_preview_msmarco
 from fusion import get_fusion_fn, list_strategies
 from utils import build_ranx_objects, evaluate_runs, make_run_dict, save_experiment_artifacts, qrels_coverage_report, save_trec_run
@@ -47,6 +47,8 @@ SUPPORTED_METRICS = [
 DEFAULT_METRICS = ["mrr@10", "ndcg@10", "precision@10", "recall@10", "recall@100", "map@100"]
 
 RETRIEVAL_MODES = ["hybrid", "sparse", "dense"]
+
+SPARSE_METHODS = ["bm25", "splade"]
 
 # Vietnamese corpus detection
 VI_CORPUS_PREFIXES = ("mmarco/v2/vi",)
@@ -142,7 +144,7 @@ def print_supported_metrics():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Hybrid Search with BM25S and Dense FAISS",
+        description="Hybrid Search with BM25S/SPLADE and Dense FAISS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     
@@ -156,6 +158,13 @@ def parse_args():
         choices=RETRIEVAL_MODES,
         help="Retrieval mode: 'hybrid' (sparse+dense+fusion), "
              "'sparse' (BM25 only), 'dense' (FAISS only). Default: hybrid",
+    )
+    
+    # Sparse method selection
+    parser.add_argument(
+        "--sparse_method", type=str, default="bm25",
+        choices=SPARSE_METHODS,
+        help="Sparse retrieval method: 'bm25' (BM25S) or 'splade' (SPLADE). Default: bm25",
     )
     
     # Fusion config
@@ -213,6 +222,16 @@ def parse_args():
     parser.add_argument("--run_name", type=str, default="demo_run", help="Name of the run")
     parser.add_argument("--sparse_index_dir", type=str, default="/home/rmits/VDT-Hybrid-Search/bm25_index", help="Path to BM25S index")
     parser.add_argument("--dense_index_dir", type=str, default="/home/rmits/VDT-Hybrid-Search/bge_small_en_v1.5_embeddings_faiss", help="Path to FAISS index")
+    
+    # SPLADE-specific settings
+    parser.add_argument("--splade_index_dir", type=str, default=None,
+                        help="Path to SPLADE index directory (required when sparse_method=splade)")
+    parser.add_argument("--splade_model_id", type=str, default="naver/splade-v3",
+                        help="SPLADE model ID for query encoding")
+    parser.add_argument("--splade_batch_size", type=int, default=128,
+                        help="Batch size for SPLADE query encoding and search")
+    parser.add_argument("--splade_device", type=str, default=None,
+                        help="Device for SPLADE model (defaults to --device)")
     
     # Evaluation metrics
     parser.add_argument(
@@ -340,6 +359,32 @@ def _run_sparse_retrieval(
     return bm25_results, stats
 
 
+def _run_splade_retrieval(splade_retriever, query_texts, top_k, splade_batch_size):
+    """Run SPLADE sparse retrieval and return (results, stats)."""
+    splade_results, splade_batch_stats = splade_retriever.search_batched(
+        query_texts,
+        top_k=top_k,
+        batch_size=splade_batch_size,
+        show_progress=True,
+    )
+    splade_time = splade_batch_stats["total_seconds"]
+    num_queries = len(query_texts)
+
+    stats = _merge_latency_stats(
+        _latency_stats(splade_time, num_queries, splade_batch_size),
+        splade_batch_stats,
+    )
+
+    print_header("SPARSE (SPLADE) RETRIEVAL LATENCY")
+    print_stat("SPLADE retrieval time", f"{splade_time:.2f}s")
+    print_stat("SPLADE avg batch latency", f"{stats.get('avg_batch_latency_seconds', 0):.4f}s (size: {splade_batch_size})")
+    print_stat("SPLADE avg query latency", f"{stats['avg_latency_seconds_per_query']:.4f}s")
+    print_stat("SPLADE p95 latency/query", _fmt_ms(stats.get("p95_batch_latency_ms_per_query", 0.0)))
+    print_stat("SPLADE QPS", f"{stats['qps']:.2f}")
+
+    return splade_results, stats
+
+
 def _run_dense_retrieval(
     dense_retriever, query_texts, top_k, dense_batch_size,
     dense_encode_batch_size, dense_search_batch_size, faiss_num_threads,
@@ -381,11 +426,16 @@ def retrieval_for_eval(
     mode,
     query_texts,
     top_k=100,
-    # Sparse args
+    # Sparse method selector
+    sparse_method="bm25",
+    # BM25 sparse args
     bm25_retriever=None,
     bm25_batch_size=512,
     n_threads=-1,
     chunk_size=128,
+    # SPLADE sparse args
+    splade_retriever=None,
+    splade_batch_size=128,
     # Dense args
     dense_retriever=None,
     dense_batch_size=512,
@@ -402,7 +452,9 @@ def retrieval_for_eval(
         mode: 'sparse', 'dense', or 'hybrid'
         query_texts: list of query strings
         top_k: number of documents to retrieve per query
-        bm25_retriever: BM25SRetriever instance (required for sparse/hybrid)
+        sparse_method: 'bm25' or 'splade' — which sparse retriever to use
+        bm25_retriever: BM25SRetriever instance (required when sparse_method='bm25')
+        splade_retriever: SpladeRetriever instance (required when sparse_method='splade')
         dense_retriever: DenseFaissRetriever instance (required for dense/hybrid)
         fusion_strategy: name of fusion strategy (only used in hybrid mode)
         fusion_kwargs: extra kwargs passed to the fusion function (e.g. rrf_k, fusion_alpha)
@@ -415,17 +467,27 @@ def retrieval_for_eval(
     fusion_kwargs = fusion_kwargs or {}
     run_results = {}
     retrieval_stats = {}
+    sparse_results = None
 
     # --- Sparse retrieval ---
     if mode in ("sparse", "hybrid"):
-        if bm25_retriever is None:
-            raise ValueError("bm25_retriever is required for sparse/hybrid mode")
-        bm25_results, bm25_stats = _run_sparse_retrieval(
-            bm25_retriever, query_texts, top_k,
-            bm25_batch_size, n_threads, chunk_size,
-        )
-        run_results["BM25S"] = bm25_results
-        retrieval_stats["bm25s"] = bm25_stats
+        if sparse_method == "splade":
+            if splade_retriever is None:
+                raise ValueError("splade_retriever is required for sparse/hybrid mode with sparse_method='splade'")
+            sparse_results, sparse_stats = _run_splade_retrieval(
+                splade_retriever, query_texts, top_k, splade_batch_size,
+            )
+            run_results["SPLADE"] = sparse_results
+            retrieval_stats["splade"] = sparse_stats
+        else:
+            if bm25_retriever is None:
+                raise ValueError("bm25_retriever is required for sparse/hybrid mode with sparse_method='bm25'")
+            sparse_results, sparse_stats = _run_sparse_retrieval(
+                bm25_retriever, query_texts, top_k,
+                bm25_batch_size, n_threads, chunk_size,
+            )
+            run_results["BM25S"] = sparse_results
+            retrieval_stats["bm25s"] = sparse_stats
 
     # --- Dense retrieval ---
     if mode in ("dense", "hybrid"):
@@ -445,7 +507,7 @@ def retrieval_for_eval(
         
         start = time.perf_counter()
         hybrid_results = fusion_fn(
-            sparse_results=bm25_results,
+            sparse_results=sparse_results,
             dense_results=dense_results,
             top_k=top_k,
             **fusion_kwargs,
@@ -453,19 +515,20 @@ def retrieval_for_eval(
         hybrid_time = time.perf_counter() - start
 
         num_queries = len(query_texts)
-        bm25_time = retrieval_stats["bm25s"]["total_seconds"]
+        sparse_stats_key = "splade" if sparse_method == "splade" else "bm25s"
+        sparse_time = retrieval_stats[sparse_stats_key]["total_seconds"]
         dense_time = retrieval_stats["dense_faiss"]["total_seconds"]
 
         fusion_display_name = f"Hybrid {fusion_strategy.upper()}"
         run_results[fusion_display_name] = hybrid_results
         retrieval_stats[f"hybrid_{fusion_strategy}_fusion_only"] = _latency_stats(hybrid_time, num_queries)
         retrieval_stats[f"hybrid_{fusion_strategy}_end_to_end"] = _latency_stats(
-            bm25_time + dense_time + hybrid_time, num_queries,
+            sparse_time + dense_time + hybrid_time, num_queries,
         )
 
         print_header(f"FUSION LATENCY ({fusion_strategy.upper()})")
         print_stat("Fusion time", f"{hybrid_time:.2f}s")
-        print_stat("Hybrid end-to-end time", f"{bm25_time + dense_time + hybrid_time:.2f}s")
+        print_stat("Hybrid end-to-end time", f"{sparse_time + dense_time + hybrid_time:.2f}s")
         print_stat("Hybrid avg query latency",
                     f"{retrieval_stats[f'hybrid_{fusion_strategy}_end_to_end']['avg_latency_seconds_per_query']:.4f}s")
 
@@ -516,32 +579,46 @@ def main():
     print_header("LOADING RETRIEVERS")
     bm25_retriever = None
     dense_retriever = None
+    splade_retriever = None
+    sparse_method = args.sparse_method
 
     vi_mode = is_vi_corpus(args.corpus_id)
     if vi_mode:
         print(f"   🇻🇳 Vietnamese corpus detected — will apply word segmentation to queries")
 
     if mode in ("sparse", "hybrid"):
-        print(f"   Loading sparse retriever (BM25S)...")
-        import re
-        def vi_bm25_splitter(text):
-            return re.findall(r"[\w_]+", text.lower())
+        if sparse_method == "splade":
+            # Validate SPLADE index dir
+            if not args.splade_index_dir:
+                print("\n❌ --splade_index_dir is required when sparse_method=splade")
+                sys.exit(1)
+            print(f"   Loading sparse retriever (SPLADE)...")
+            splade_retriever = SpladeRetriever.load(
+                args.splade_index_dir,
+                batch_size=args.splade_batch_size,
+                device=args.splade_device or args.device,
+            )
+        else:
+            print(f"   Loading sparse retriever (BM25S)...")
+            import re
+            def vi_bm25_splitter(text):
+                return re.findall(r"[\w_]+", text.lower())
 
-        # For Vietnamese index: use custom regex splitter to strip punctuation 
-        # and lowercase text, matching the BM25S index tokenizer.
-        bm25_tokenize_kwargs = (
-            {"splitter": vi_bm25_splitter, "stopwords": [], "stemmer": None}
-            if vi_mode
-            else {}
-        )
-        bm25_retriever = BM25SRetriever.load(
-            args.sparse_index_dir,
-            mmap=args.bm25_mmap,
-            tokenize_kwargs=bm25_tokenize_kwargs,
-            backend=args.bm25_backend,
-            backend_selection=args.bm25_backend_selection,
-            n_threads=args.n_threads,
-        )
+            # For Vietnamese index: use custom regex splitter to strip punctuation 
+            # and lowercase text, matching the BM25S index tokenizer.
+            bm25_tokenize_kwargs = (
+                {"splitter": vi_bm25_splitter, "stopwords": [], "stemmer": None}
+                if vi_mode
+                else {}
+            )
+            bm25_retriever = BM25SRetriever.load(
+                args.sparse_index_dir,
+                mmap=args.bm25_mmap,
+                tokenize_kwargs=bm25_tokenize_kwargs,
+                backend=args.bm25_backend,
+                backend_selection=args.bm25_backend_selection,
+                n_threads=args.n_threads,
+            )
 
     if mode in ("dense", "hybrid"):
         print(f"   Loading dense retriever (FAISS)...")
@@ -595,18 +672,22 @@ def main():
         "fusion_alpha": args.fusion_alpha,
     }
 
-    print_header(f"RUNNING RETRIEVAL PIPELINE (MODE={mode.upper()}, TOP K={args.top_k})")
+    print_header(f"RUNNING RETRIEVAL PIPELINE (MODE={mode.upper()}, SPARSE={sparse_method.upper()}, TOP K={args.top_k})")
     if mode == "hybrid":
         print_stat("Fusion strategy", args.fusion_strategy)
+        print_stat("Sparse method", sparse_method)
 
     run_results, retrieval_stats = retrieval_for_eval(
         mode=mode,
         query_texts=eval_query_texts,
         top_k=args.top_k,
+        sparse_method=sparse_method,
         bm25_retriever=bm25_retriever,
         bm25_batch_size=args.bm25_batch_size,
         n_threads=args.n_threads,
         chunk_size=args.chunk_size,
+        splade_retriever=splade_retriever,
+        splade_batch_size=args.splade_batch_size,
         dense_retriever=dense_retriever,
         dense_batch_size=args.dense_batch_size,
         dense_encode_batch_size=args.dense_encode_batch_size,
@@ -638,19 +719,34 @@ def main():
             print(f"   Measuring latency for all {len(sample_queries):,} queries.")
             
         if mode in ("sparse", "hybrid"):
-            print("   Measuring BM25S per-query latency...")
-            _, pq_stats = bm25_retriever.search_batched(
-                sample_queries, top_k=args.top_k, batch_size=1, show_progress=True, n_threads=1
-            )
-            retrieval_stats["bm25s_per_query"] = {
-                "p50_query_latency_ms": pq_stats.get("p50_batch_latency_ms", 0.0),
-                "p90_query_latency_ms": pq_stats.get("p90_batch_latency_ms", 0.0),
-                "p95_query_latency_ms": pq_stats.get("p95_batch_latency_ms", 0.0),
-                "p99_query_latency_ms": pq_stats.get("p99_batch_latency_ms", 0.0),
-            }
-            print_stat("BM25 p50 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p50_query_latency_ms"]))
-            print_stat("BM25 p95 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p95_query_latency_ms"]))
-            print_stat("BM25 p99 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p99_query_latency_ms"]))
+            if sparse_method == "splade":
+                print("   Measuring SPLADE per-query latency...")
+                _, pq_stats = splade_retriever.search_batched(
+                    sample_queries, top_k=args.top_k, batch_size=1, show_progress=True
+                )
+                retrieval_stats["splade_per_query"] = {
+                    "p50_query_latency_ms": pq_stats.get("p50_batch_latency_ms", 0.0),
+                    "p90_query_latency_ms": pq_stats.get("p90_batch_latency_ms", 0.0),
+                    "p95_query_latency_ms": pq_stats.get("p95_batch_latency_ms", 0.0),
+                    "p99_query_latency_ms": pq_stats.get("p99_batch_latency_ms", 0.0),
+                }
+                print_stat("SPLADE p50 query latency", _fmt_ms(retrieval_stats["splade_per_query"]["p50_query_latency_ms"]))
+                print_stat("SPLADE p95 query latency", _fmt_ms(retrieval_stats["splade_per_query"]["p95_query_latency_ms"]))
+                print_stat("SPLADE p99 query latency", _fmt_ms(retrieval_stats["splade_per_query"]["p99_query_latency_ms"]))
+            else:
+                print("   Measuring BM25S per-query latency...")
+                _, pq_stats = bm25_retriever.search_batched(
+                    sample_queries, top_k=args.top_k, batch_size=1, show_progress=True, n_threads=1
+                )
+                retrieval_stats["bm25s_per_query"] = {
+                    "p50_query_latency_ms": pq_stats.get("p50_batch_latency_ms", 0.0),
+                    "p90_query_latency_ms": pq_stats.get("p90_batch_latency_ms", 0.0),
+                    "p95_query_latency_ms": pq_stats.get("p95_batch_latency_ms", 0.0),
+                    "p99_query_latency_ms": pq_stats.get("p99_batch_latency_ms", 0.0),
+                }
+                print_stat("BM25 p50 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p50_query_latency_ms"]))
+                print_stat("BM25 p95 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p95_query_latency_ms"]))
+                print_stat("BM25 p99 query latency", _fmt_ms(retrieval_stats["bm25s_per_query"]["p99_query_latency_ms"]))
 
         if mode in ("dense", "hybrid"):
             print("   Measuring Dense FAISS per-query latency...")
@@ -745,7 +841,7 @@ def main():
         print(scores_df)
 
     # Coverage report — pass whichever retrievers were loaded
-    active_retrievers = [r for r in [bm25_retriever, dense_retriever] if r is not None]
+    active_retrievers = [r for r in [bm25_retriever, splade_retriever, dense_retriever] if r is not None]
     coverage_df = qrels_coverage_report(eval_query_ids, qrels, *active_retrievers)
     if coverage_df is not None:
         print_header("COVERAGE REPORT")

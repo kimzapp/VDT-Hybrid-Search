@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import time
 import traceback
+from copy import deepcopy
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ if scripts_path not in sys.path:
     sys.path.insert(0, scripts_path)
 
 import config
+from cache import RedisCache
 from retriever import BM25SRetriever, DenseFaissRetriever, CrossEncoderReranker
 from fusion import get_fusion_fn, list_strategies
 
@@ -43,15 +45,17 @@ app.add_middleware(
 bm25_retriever = None
 dense_retriever = None
 reranker = None
+topic_router = None
 docs_store = None
 metadata_db_path = None
 dense_loaded = False
 dense_load_error = None
+query_cache: RedisCache = None
 
 # Lifespan/Startup Initialization
 @app.on_event("startup")
 def startup_event():
-    global bm25_retriever, dense_retriever, reranker, docs_store, metadata_db_path, dense_loaded, dense_load_error
+    global bm25_retriever, dense_retriever, reranker, topic_router, docs_store, metadata_db_path, dense_loaded, dense_load_error, query_cache
 
     # 1. Load Sparse Retriever (BM25S)
     print("Loading sparse index (BM25S)...")
@@ -129,11 +133,43 @@ def startup_event():
     else:
         print(f"Warning: Metadata database {config.METADATA_DB} not found. Metadata will not be displayed.")
 
+    # 5. Initialize Redis Cache
+    print("Initializing Redis query cache...")
+    query_cache = RedisCache(
+        host=config.REDIS_HOST,
+        port=config.REDIS_PORT,
+        db=config.REDIS_DB,
+        password=config.REDIS_PASSWORD,
+        ttl=config.REDIS_CACHE_TTL,
+        key_prefix=config.REDIS_KEY_PREFIX,
+        enabled=config.REDIS_CACHE_ENABLED,
+    )
+
+    # 6. Load Topic Router (pre-loads FAISS shards + classifier)
+    if config.TOPIC_SEARCH_ENABLED and os.path.exists(config.TOPIC_INDEX_DIR):
+        print(f"Loading Topic Router from {config.TOPIC_INDEX_DIR}...")
+        try:
+            from topic_router import TopicRouter
+            topic_router = TopicRouter(
+                index_dir=config.TOPIC_INDEX_DIR,
+                classifier_model=config.TOPIC_CLASSIFIER_MODEL,
+                device=config.DEVICE,
+            )
+            print("Successfully loaded Topic Router.")
+        except Exception as e:
+            print(f"Error loading Topic Router: {e}")
+            traceback.print_exc()
+    else:
+        if not config.TOPIC_SEARCH_ENABLED:
+            print("Topic search is disabled by configuration.")
+        else:
+            print(f"Warning: Topic index directory {config.TOPIC_INDEX_DIR} does not exist.")
+
 
 # Request/Response schemas
 class SearchRequest(BaseModel):
     query: str
-    mode: str = Field(default="hybrid", description="sparse | dense | hybrid")
+    mode: str = Field(default="hybrid", description="sparse | dense | hybrid | topic_dense")
     top_k: int = Field(default=10, ge=1, le=100)
     fusion_strategy: str = Field(default="rrf", description="rrf | weighted_sum | combsum | combmnz | borda | union")
     rrf_k: int = Field(default=60, ge=1)
@@ -152,6 +188,7 @@ class SearchResultItem(BaseModel):
     text: str
     author_name: Optional[str] = None
     written_date: Optional[str] = None
+    topic: Optional[str] = None
 
 class LatencyStats(BaseModel):
     total_ms: float
@@ -159,22 +196,28 @@ class LatencyStats(BaseModel):
     dense_ms: Optional[float] = None
     fusion_ms: Optional[float] = None
     rerank_ms: Optional[float] = None
+    cache_lookup_ms: Optional[float] = None
+    topic_classify_ms: Optional[float] = None
+    topic_search_ms: Optional[float] = None
 
 class SearchResponse(BaseModel):
     query: str
     mode: str
     top_k: int
     results: List[SearchResultItem]
+    classified_topics: Optional[List[str]] = None
     latency: LatencyStats
     fusion_strategy: Optional[str] = None
     num_results: int
     total_before_filter: int = 0
+    cache_hit: bool = False
 
 class AuthorPassageItem(BaseModel):
     doc_id: str
     text: str
     author_name: str
     written_date: Optional[str] = None
+    topic: Optional[str] = None
 
 class AuthorPassagesResponse(BaseModel):
     author_name: str
@@ -192,6 +235,7 @@ def health_check():
         "status": "healthy",
         "sparse_index_loaded": bm25_retriever is not None,
         "dense_index_loaded": dense_loaded,
+        "topic_router_loaded": topic_router is not None,
         "docs_store_loaded": docs_store is not None,
     }
 
@@ -228,13 +272,20 @@ def _batch_lookup_metadata(doc_ids: list) -> dict:
             batch = doc_ids[i:i + batch_size]
             placeholders = ",".join("?" * len(batch))
             cursor.execute(
-                f"SELECT doc_id, author_name, written_date FROM passage_metadata_full WHERE doc_id IN ({placeholders})",
+                f"""
+                SELECT p.doc_id, p.author_name, p.written_date, GROUP_CONCAT(t.topic, ', ') as topic
+                FROM passage_metadata_full p
+                LEFT JOIN document_topics t ON p.doc_id = t.doc_id
+                WHERE p.doc_id IN ({placeholders})
+                GROUP BY p.doc_id
+                """,
                 batch,
             )
             for row in cursor.fetchall():
                 result[row[0]] = {
                     "author_name": row[1],
                     "written_date": row[2],
+                    "topic": row[3],
                 }
 
         conn.close()
@@ -248,9 +299,23 @@ def _batch_lookup_metadata(doc_ids: list) -> dict:
 def search(req: SearchRequest):
     t_start = time.perf_counter()
 
+    # --- Cache lookup ---
+    cache_lookup_ms = None
+    if query_cache is not None and query_cache.is_available:
+        t_cache = time.perf_counter()
+        search_params = RedisCache.extract_search_params(req)
+        cached = query_cache.get(search_params)
+        cache_lookup_ms = (time.perf_counter() - t_cache) * 1000.0
+        if cached is not None:
+            # Cache hit — return cached response with updated timing
+            cached["cache_hit"] = True
+            cached["latency"]["total_ms"] = (time.perf_counter() - t_start) * 1000.0
+            cached["latency"]["cache_lookup_ms"] = cache_lookup_ms
+            return SearchResponse(**cached)
+
     mode = req.mode.lower().strip()
-    if mode not in ("sparse", "dense", "hybrid"):
-        raise HTTPException(status_code=400, detail="Invalid search mode. Choose from: 'sparse', 'dense', 'hybrid'")
+    if mode not in ("sparse", "dense", "hybrid", "topic_dense"):
+        raise HTTPException(status_code=400, detail="Invalid search mode. Choose from: 'sparse', 'dense', 'hybrid', 'topic_dense'")
 
     if mode == "sparse" and bm25_retriever is None:
         raise HTTPException(status_code=503, detail="Sparse index is not loaded/available on backend.")
@@ -264,12 +329,36 @@ def search(req: SearchRequest):
             status_code=503,
             detail=f"Hybrid search requires both sparse and dense indices loaded. Loaded: {available}"
         )
+    if mode == "topic_dense" and topic_router is None:
+        raise HTTPException(status_code=503, detail="Topic router is not loaded. Check TOPIC_INDEX_DIR and TOPIC_SEARCH_ENABLED.")
 
     sparse_ms = None
     dense_ms = None
     fusion_ms = None
     rerank_ms = None
+    topic_classify_ms = None
+    topic_search_ms = None
+    classified_topics = None
     final_results = {}  # doc_id -> score
+
+    # 0. Topic-Dense Search (early return path for topic_dense mode)
+    if mode == "topic_dense":
+        try:
+            results, stats = topic_router.search(
+                queries=[req.query],
+                top_k=req.top_k,
+                final_top_k=req.top_k,
+                encode_batch_size=1,
+                classifier_batch_size=1,
+            )
+            final_results = results[0]
+            topic_classify_ms = stats["classify_ms"]
+            topic_search_ms = stats["search_ms"] + stats["encode_ms"]
+            # Extract classified topics for this query
+            classified_topics = stats["query_topics"][0] if stats.get("query_topics") else None
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error executing topic-dense search: {str(e)}")
 
     # 1. Sparse Search
     if mode in ("sparse", "hybrid"):
@@ -353,7 +442,7 @@ def search(req: SearchRequest):
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error executing fusion: {str(e)}")
 
-    # 3.5 Reranking
+    # 3.5 Reranking (applicable to all modes that produce final_results)
     if req.rerank:
         if reranker is None:
             raise HTTPException(status_code=503, detail="Reranker is not loaded on backend.")
@@ -430,27 +519,43 @@ def search(req: SearchRequest):
                 text=text,
                 author_name=meta.get("author_name"),
                 written_date=meta.get("written_date"),
+                topic=meta.get("topic"),
             )
         )
 
     t_total = (time.perf_counter() - t_start) * 1000.0
 
-    return SearchResponse(
+    response = SearchResponse(
         query=req.query,
         mode=mode,
         top_k=req.top_k,
         results=results_list,
+        classified_topics=classified_topics,
         latency=LatencyStats(
             total_ms=t_total,
             sparse_ms=sparse_ms,
             dense_ms=dense_ms,
             fusion_ms=fusion_ms,
             rerank_ms=rerank_ms,
+            cache_lookup_ms=cache_lookup_ms,
+            topic_classify_ms=topic_classify_ms,
+            topic_search_ms=topic_search_ms,
         ),
         fusion_strategy=req.fusion_strategy if mode == "hybrid" else None,
         num_results=len(results_list),
         total_before_filter=total_before_filter,
+        cache_hit=False,
     )
+
+    # --- Store result in cache ---
+    if query_cache is not None and query_cache.is_available:
+        try:
+            search_params = RedisCache.extract_search_params(req)
+            query_cache.set(search_params, response.model_dump())
+        except Exception as e:
+            print(f"Warning: Failed to store search result in cache — {e}")
+
+    return response
 
 
 @app.get("/api/author/passages")
@@ -490,8 +595,14 @@ def get_author_passages(
         offset = (page - 1) * page_size
 
         cursor.execute(
-            "SELECT doc_id, author_name, written_date FROM passage_metadata_full "
-            "WHERE author_name = ? ORDER BY written_date DESC LIMIT ? OFFSET ?",
+            """
+            SELECT p.doc_id, p.author_name, p.written_date, GROUP_CONCAT(t.topic, ', ') as topic
+            FROM passage_metadata_full p
+            LEFT JOIN document_topics t ON p.doc_id = t.doc_id
+            WHERE p.author_name = ?
+            GROUP BY p.doc_id
+            ORDER BY p.written_date DESC LIMIT ? OFFSET ?
+            """,
             (author_name, page_size, offset),
         )
         rows = cursor.fetchall()
@@ -499,7 +610,7 @@ def get_author_passages(
 
         passages = []
         for row in rows:
-            doc_id, a_name, written_date = row
+            doc_id, a_name, written_date, topic = row
             text = "Passage text database not loaded."
             if docs_store is not None:
                 try:
@@ -516,6 +627,7 @@ def get_author_passages(
                 text=text,
                 author_name=a_name,
                 written_date=written_date,
+                topic=topic,
             ))
 
         return AuthorPassagesResponse(
@@ -529,6 +641,58 @@ def get_author_passages(
 
     except sqlite3.Error as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+# ==============================================================================
+# Cache Admin Endpoints
+# ==============================================================================
+
+@app.get("/api/cache/stats")
+def cache_stats():
+    """Return cache statistics (number of cached queries, memory usage, etc.)."""
+    if query_cache is None:
+        return {"available": False, "enabled": False, "cached_queries": 0}
+    return query_cache.stats()
+
+
+@app.post("/api/cache/flush")
+def cache_flush():
+    """Flush all cached search results."""
+    if query_cache is None or not query_cache.is_available:
+        raise HTTPException(status_code=503, detail="Cache is not available.")
+    success = query_cache.flush_all()
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to flush cache.")
+    return {"status": "ok", "message": "All cached queries have been flushed."}
+
+
+# Serve frontend static files
+frontend_dir = os.path.join(PROJECT_ROOT, "frontend")
+if os.path.exists(frontend_dir):
+    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+else:
+    print(f"Warning: Frontend directory {frontend_dir} not found. Static files will not be served.")
+
+
+if __name__ == "__main__":
+    print(f"Starting server on http://{config.HOST}:{config.PORT}...")
+    uvicorn.run("app:app", host=config.HOST, port=config.PORT, reload=True)
+@app.get("/api/cache/stats")
+def cache_stats():
+    """Return cache statistics (number of cached queries, memory usage, etc.)."""
+    if query_cache is None:
+        return {"available": False, "enabled": False, "cached_queries": 0}
+    return query_cache.stats()
+
+
+@app.post("/api/cache/flush")
+def cache_flush():
+    """Flush all cached search results."""
+    if query_cache is None or not query_cache.is_available:
+        raise HTTPException(status_code=503, detail="Cache is not available.")
+    success = query_cache.flush_all()
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to flush cache.")
+    return {"status": "ok", "message": "All cached queries have been flushed."}
 
 
 # Serve frontend static files

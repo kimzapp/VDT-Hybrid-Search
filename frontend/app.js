@@ -10,16 +10,16 @@ document.addEventListener("DOMContentLoaded", () => {
     const modeBtns = document.querySelectorAll(".mode-btn");
     const advancedToggle = document.getElementById("advanced-toggle");
     const advancedSettings = document.getElementById("advanced-settings");
-    
+
     // Config Sliders & Selects
     const topKSlider = document.getElementById("top-k-slider");
     const topKVal = document.getElementById("top-k-val");
     const fusionStrategySelect = document.getElementById("fusion-strategy");
-    
+
     const rrfKGroup = document.getElementById("rrf-k-group");
     const rrfKSlider = document.getElementById("rrf-k-slider");
     const rrfKVal = document.getElementById("rrf-k-val");
-    
+
     const fusionAlphaGroup = document.getElementById("fusion-alpha-group");
     const fusionAlphaSlider = document.getElementById("fusion-alpha-slider");
     const fusionAlphaVal = document.getElementById("fusion-alpha-val");
@@ -82,14 +82,20 @@ document.addEventListener("DOMContentLoaded", () => {
     const sampleQueries = [
         "Manhattan Project success",
         "What is reciprocal rank fusion",
-        "hệ thống tìm kiếm kết hợp hybrid search",
-        "dự án manhattan thành công",
-        "large language models"
+        "hybrid search retrieval system",
+        "large language models",
+        "latest land law regulations",
+        "impact of inflation on the economy",
+        "monetary policy of the central bank",
+        "corporate and intellectual property law",
+        "advancements in cancer immunotherapy",
+        "history of the summer olympic games",
+        "causes of the french revolution"
     ];
 
     // 1. Initialize Sample Chips
     renderSampleChips();
-    
+
     function renderSampleChips() {
         queryChipsContainer.innerHTML = "";
         sampleQueries.forEach(q => {
@@ -119,7 +125,7 @@ document.addEventListener("DOMContentLoaded", () => {
     advancedToggle.addEventListener("click", () => {
         const isCollapsed = advancedSettings.classList.contains("collapsed");
         const caret = advancedToggle.querySelector(".caret-icon");
-        
+
         if (isCollapsed) {
             advancedSettings.classList.remove("collapsed");
             caret.style.transform = "rotate(180deg)";
@@ -172,7 +178,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const res = await fetch(`${API_BASE}/api/config`);
             if (!res.ok) throw new Error("Connection failed");
             const data = await res.json();
-            
+
             // Populate fusion strategies select
             fusionStrategySelect.innerHTML = "";
             const strategyNames = {
@@ -213,10 +219,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // 6. Config Parameters Visibility toggles
     function handleVisibilityRules() {
         const hybridFields = document.querySelectorAll(".hybrid-only-field");
-        
+
         if (currentMode === "hybrid") {
             hybridFields.forEach(el => el.style.display = "block");
-            
+
             const strategy = fusionStrategySelect.value;
             if (strategy === "rrf") {
                 rrfKGroup.style.display = "block";
@@ -253,7 +259,7 @@ document.addEventListener("DOMContentLoaded", () => {
         errorBox.style.display = "none";
         statsDashboard.style.display = "none";
         paginationControls.style.display = "none";
-        
+
         // Clear old results (remove cards, keep welcome card invisible)
         resultsList.querySelectorAll(".result-card, .welcome-card, .no-results-card, .filter-info-card").forEach(el => el.remove());
 
@@ -297,7 +303,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             const data = await res.json();
-            
+
             // Hide loading indicator
             loadingIndicator.style.display = "none";
 
@@ -395,20 +401,23 @@ document.addEventListener("DOMContentLoaded", () => {
     function createResultCard(doc, query) {
         const card = document.createElement("div");
         card.className = "result-card glass-panel";
-        
+
         // Highlight text
         const highlightedText = highlightQueryTerms(doc.text, query);
 
         // Build metadata line with clickable author
         let metaHtml = "";
-        if (doc.author_name || doc.written_date) {
+        if (doc.author_name || doc.written_date || doc.topic) {
             const authorPart = doc.author_name
                 ? `<a class="meta-item author-link" href="#" data-author="${escapeHtml(doc.author_name)}"><i class="fa-solid fa-user-pen"></i> ${escapeHtml(doc.author_name)}</a>`
                 : "";
             const datePart = doc.written_date
                 ? `<span class="meta-item"><i class="fa-regular fa-calendar"></i> ${escapeHtml(doc.written_date)}</span>`
                 : "";
-            metaHtml = `<div class="result-metadata">${authorPart}${datePart}</div>`;
+            const topicPart = doc.topic
+                ? `<span class="meta-item"><i class="fa-solid fa-tag"></i> ${escapeHtml(doc.topic)}</span>`
+                : "";
+            metaHtml = `<div class="result-metadata">${authorPart}${datePart}${topicPart}</div>`;
         }
 
         // Score badge: only show if score field exists (search results)
@@ -420,7 +429,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const rankBadge = doc.rank !== undefined
             ? `<span class="rank-badge">#${doc.rank}</span>`
             : "";
-        
+
         card.innerHTML = `
             <div class="result-bar"></div>
             <div class="result-header">
@@ -435,7 +444,7 @@ document.addEventListener("DOMContentLoaded", () => {
             ${metaHtml}
             <div class="result-content">${highlightedText}</div>
         `;
-        
+
         // Copy button
         const copyBtn = card.querySelector(".doc-id-btn");
         copyBtn.addEventListener("click", () => {
@@ -544,6 +553,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         <span class="modal-passage-num">#${globalIdx}</span>
                         <span class="modal-passage-docid">ID: ${passage.doc_id}</span>
                         ${passage.written_date ? `<span class="modal-passage-date"><i class="fa-regular fa-calendar"></i> ${escapeHtml(passage.written_date)}</span>` : ""}
+                        ${passage.topic ? `<span class="modal-passage-topic"><i class="fa-solid fa-tag"></i> ${escapeHtml(passage.topic)}</span>` : ""}
                     </div>
                     <div class="modal-passage-text">${escapeHtml(passage.text)}</div>
                 `;
@@ -586,7 +596,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // 11. Update Latency indicators
     function renderDashboard(lat) {
         statsDashboard.style.display = "block";
-        
+
         // Format strings
         updateStatCard(statTotal, lat.total_ms, "End-to-End Latency");
         updateStatCard(statSparse, currentMode !== "dense" ? lat.sparse_ms : 0.0, "Sparse Retrieval (BM25S)");
@@ -603,7 +613,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // Set relative progress fills
         const maxVal = Math.max(lat.total_ms, lat.sparse_ms || 0, lat.dense_ms || 0, lat.fusion_ms || 0, lat.rerank_ms || 0, 10);
-        
+
         setFillWidth(statTotal, (lat.total_ms / maxVal) * 100);
         setFillWidth(statSparse, currentMode !== "dense" ? (lat.sparse_ms / maxVal) * 100 : 0);
         setFillWidth(statDense, currentMode !== "sparse" ? (lat.dense_ms / maxVal) * 100 : 0);
@@ -634,13 +644,13 @@ document.addEventListener("DOMContentLoaded", () => {
             .split(/[\s,.\-\/]+/)
             .filter(t => t.length >= 3)
             .filter((value, index, self) => self.indexOf(value) === index);
-            
+
         if (terms.length === 0) return escapeHtml(text);
-        
+
         // Escape characters for regex
         const escapedTerms = terms.map(t => t.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'));
         const pattern = new RegExp(`\\b(${escapedTerms.join('|')})\\b`, 'gi');
-        
+
         // Perform replacement safely on text
         const safeText = escapeHtml(text);
         try {

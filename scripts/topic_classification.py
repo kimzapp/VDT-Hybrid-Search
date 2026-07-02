@@ -19,23 +19,16 @@ except ImportError:
 
 # Default topics
 DEFAULT_TOPICS = [
-    "science_technology",
-    "health_medicine",
-    "history",
-    "geography_travel",
-    "sports",
-    "entertainment",
-    "business_finance",
-    "education",
-    "law_government",
-    "food_cooking",
-    "nature_environment",
-    "arts_culture",
-    "math",
-    "people_society",
-    "language_communication",
-    "religion_philosophy",
-    "other"
+    "health and medicine",
+    "technology and computing",
+    "science and education",
+    "business finance and jobs",
+    "law government and public services",
+    "geography travel and transportation",
+    "home food lifestyle and consumer products",
+    "entertainment sports and popular culture",
+    "people history and society",
+    "other or ambiguous"
 ]
 
 def parse_args():
@@ -56,6 +49,9 @@ def parse_args():
                         help="Device to use for model.")
     parser.add_argument("--threshold", type=float, default=0.5,
                         help="Confidence threshold for multi-label classification.")
+    parser.add_argument("--classification_type", type=str, default="multi-label",
+                        choices=["single-label", "multi-label"],
+                        help="Type of classification: single-label or multi-label.")
     
     parser.add_argument("--quick_run", action="store_true",
                         help="Run on a small subset (1000 docs).")
@@ -167,7 +163,7 @@ def run_classification(rank, num_gpus, args, lock=None):
     tokenizer = AutoTokenizer.from_pretrained(args.model, add_prefix_space=True)
     pipeline = ZeroShotClassificationPipeline(
         model, tokenizer, 
-        classification_type='multi-label', 
+        classification_type=args.classification_type, 
         device=device
     )
     
@@ -211,7 +207,10 @@ def run_classification(rank, num_gpus, args, lock=None):
         
         out_records = []
         try:
-            results = pipeline(batch_texts, DEFAULT_TOPICS, threshold=args.threshold, batch_size=len(batch_texts))
+            if args.classification_type == "multi-label":
+                results = pipeline(batch_texts, DEFAULT_TOPICS, threshold=args.threshold, batch_size=len(batch_texts))
+            else:
+                results = pipeline(batch_texts, DEFAULT_TOPICS, batch_size=len(batch_texts))
             
             for i, doc_id in enumerate(batch_ids):
                 topic_scores = {res["label"]: float(res["score"]) for res in results[i]}
@@ -257,6 +256,7 @@ def main():
     
     print(f"Model: {args.model}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Classification type: {args.classification_type}")
     print(f"Output path: {args.output_path}")
     print(f"Categories ({len(DEFAULT_TOPICS)}): {DEFAULT_TOPICS}")
     print(f"Multi-GPU: {args.multi_gpu}")

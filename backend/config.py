@@ -37,3 +37,24 @@ PORT = int(os.environ.get("PORT", 8888))
 
 # CORS Allowed Origins
 CORS_ORIGINS = ["*"]
+
+# Redis Cache settings
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+REDIS_DB = int(os.environ.get("REDIS_DB", 0))
+REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", None)
+REDIS_CACHE_TTL = int(os.environ.get("REDIS_CACHE_TTL", 3600))  # 1 hour default
+REDIS_CACHE_ENABLED = os.environ.get("REDIS_CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
+REDIS_KEY_PREFIX = os.environ.get("REDIS_KEY_PREFIX", "vdt_search:")
+
+# Topic Search settings
+TOPIC_INDEX_DIR = os.environ.get(
+    "TOPIC_INDEX_DIR", os.path.join(PROJECT_ROOT, "bge_small_embedding_topic_shards")
+)
+TOPIC_CLASSIFIER_MODEL = os.environ.get(
+    "TOPIC_CLASSIFIER_MODEL", "knowledgator/gliclass-modern-base-v2.0-init"
+)
+TOPIC_SEARCH_ENABLED = os.environ.get(
+    "TOPIC_SEARCH_ENABLED", "true"
+).lower() in ("true", "1", "yes")
+

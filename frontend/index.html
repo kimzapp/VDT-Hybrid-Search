@@ -1,18 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VDT Hybrid Search — High-Performance Retrieval Engine</title>
-    <meta name="description" content="A state-of-the-art information retrieval interface combining BM25S sparse search and Dense FAISS vector retrieval.">
+    <meta name="description"
+        content="A state-of-the-art information retrieval interface combining BM25S sparse search and Dense FAISS vector retrieval.">
     <!-- Google Fonts: Inter & Outfit -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
     <!-- FontAwesome for Premium Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=2">
 </head>
+
 <body>
     <!-- Background glowing ambient spots -->
     <div class="glow-bg">
@@ -36,7 +41,8 @@
                 <!-- Search bar -->
                 <div class="search-bar-wrapper">
                     <i class="fa-solid fa-magnifying-glass search-icon"></i>
-                    <input type="text" id="query-input" placeholder="Enter your query here..." autofocus autocomplete="off">
+                    <input type="text" id="query-input" placeholder="Enter your query here..." autofocus
+                        autocomplete="off">
                     <button id="search-btn" class="btn btn-primary">
                         <span>Search</span>
                         <i class="fa-solid fa-arrow-right"></i>
@@ -131,7 +137,8 @@
                                     <label for="date-to">To</label>
                                     <input type="date" id="date-to" class="date-input">
                                 </div>
-                                <button type="button" class="btn-clear-date" id="clear-dates" title="Clear date filters">
+                                <button type="button" class="btn-clear-date" id="clear-dates"
+                                    title="Clear date filters">
                                     <i class="fa-solid fa-xmark"></i>
                                 </button>
                             </div>
@@ -141,33 +148,40 @@
                         <!-- Neural Reranking -->
                         <div class="setting-item setting-item-full">
                             <label><i class="fa-solid fa-layer-group"></i> Neural Reranking</label>
-                            <div class="rerank-controls" style="display: flex; gap: 20px; align-items: center; margin-top: 10px;">
+                            <div class="rerank-controls"
+                                style="display: flex; gap: 20px; align-items: center; margin-top: 10px;">
                                 <div class="checkbox-group">
-                                    <input type="checkbox" id="rerank-toggle">
+                                    <input type="checkbox" id="rerank-toggle" checked>
                                     <label for="rerank-toggle">Enable CrossEncoder Reranking</label>
                                 </div>
                                 <div class="slider-group" style="flex: 1;">
-                                    <label for="rerank-k-slider" style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                                    <label for="rerank-k-slider"
+                                        style="display: flex; justify-content: space-between; font-size: 0.9rem;">
                                         <span>Rerank Top-K</span>
                                         <span class="val-display" id="rerank-k-val">100</span>
                                     </label>
-                                    <input type="range" id="rerank-k-slider" min="10" max="1000" value="100" step="10" style="width: 100%;">
+                                    <input type="range" id="rerank-k-slider" min="10" max="1000" value="100" step="10"
+                                        style="width: 100%;">
                                 </div>
                             </div>
-                            <div class="rerank-controls wcr-controls" id="wcr-settings" style="display: none; gap: 20px; align-items: center; margin-top: 10px; border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 10px;">
+                            <div class="rerank-controls wcr-controls" id="wcr-settings"
+                                style="display: flex; gap: 20px; align-items: center; margin-top: 10px; border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 10px;">
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="wcr-toggle">
                                     <label for="wcr-toggle">Enable WCR (Weighted Combination)</label>
                                 </div>
                                 <div class="slider-group" style="flex: 1;">
-                                    <label for="wcr-alpha-slider" style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                                    <label for="wcr-alpha-slider"
+                                        style="display: flex; justify-content: space-between; font-size: 0.9rem;">
                                         <span>WCR Alpha (Retrieval Weight)</span>
                                         <span class="val-display" id="wcr-alpha-val">0.50</span>
                                     </label>
-                                    <input type="range" id="wcr-alpha-slider" min="0.0" max="1.0" value="0.5" step="0.05" style="width: 100%;">
+                                    <input type="range" id="wcr-alpha-slider" min="0.0" max="1.0" value="0.5"
+                                        step="0.05" style="width: 100%;">
                                 </div>
                             </div>
-                            <span class="setting-desc">Applies CrossEncoder reranking to the top retrieved results for higher accuracy. WCR combines original retrieval scores with reranking scores.</span>
+                            <span class="setting-desc">Applies CrossEncoder reranking to the top retrieved results for
+                                higher accuracy. WCR combines original retrieval scores with reranking scores.</span>
                         </div>
                     </div>
                 </div>
@@ -180,27 +194,37 @@
                 <div class="stat-card glass-panel" id="stat-total">
                     <span class="stat-label">End-to-End Latency</span>
                     <span class="stat-value">-- ms</span>
-                    <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
+                    <div class="stat-bar">
+                        <div class="fill" style="width: 0%;"></div>
+                    </div>
                 </div>
                 <div class="stat-card glass-panel" id="stat-sparse">
                     <span class="stat-label">Sparse Retrieval (BM25S)</span>
                     <span class="stat-value">-- ms</span>
-                    <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
+                    <div class="stat-bar">
+                        <div class="fill" style="width: 0%;"></div>
+                    </div>
                 </div>
                 <div class="stat-card glass-panel" id="stat-dense">
                     <span class="stat-label">Dense Encoding & FAISS</span>
                     <span class="stat-value">-- ms</span>
-                    <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
+                    <div class="stat-bar">
+                        <div class="fill" style="width: 0%;"></div>
+                    </div>
                 </div>
                 <div class="stat-card glass-panel" id="stat-fusion">
                     <span class="stat-label">Fusion Processing</span>
                     <span class="stat-value">-- ms</span>
-                    <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
+                    <div class="stat-bar">
+                        <div class="fill" style="width: 0%;"></div>
+                    </div>
                 </div>
                 <div class="stat-card glass-panel" id="stat-rerank" style="display: none;">
                     <span class="stat-label">CrossEncoder Rerank</span>
                     <span class="stat-value">-- ms</span>
-                    <div class="stat-bar"><div class="fill" style="width: 0%;"></div></div>
+                    <div class="stat-bar">
+                        <div class="fill" style="width: 0%;"></div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -228,7 +252,9 @@
                 <div class="welcome-card glass-panel">
                     <i class="fa-regular fa-folder-open welcome-icon"></i>
                     <h2>Ready to Search</h2>
-                    <p>Enter a query above to start searching over <strong>8.8 Million passages</strong> of the MSMARCO dataset. Try selecting different retrieval modes and advanced settings to observe how retrieval paths impact scores and latencies.</p>
+                    <p>Enter a query above to start searching over <strong>8.8 Million passages</strong> of the MSMARCO
+                        dataset. Try selecting different retrieval modes and advanced settings to observe how retrieval
+                        paths impact scores and latencies.</p>
                 </div>
             </div>
 
@@ -275,6 +301,7 @@
     </div>
 
     <!-- Client-side Application Script -->
-    <script src="app.js"></script>
+    <script src="app.js?v=2"></script>
 </body>
+
 </html>
